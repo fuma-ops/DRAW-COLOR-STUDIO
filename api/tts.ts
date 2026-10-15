@@ -13,7 +13,12 @@ export default async function handler(req: any, res: any) {
 
     const safeVoice = VOICES.includes(voiceName) ? voiceName : 'Aoede';
     const l = String(lang).toLowerCase();
-    const safeLang = l.includes('gb') || l.includes('uk') ? 'en-uk' : 'en';
+    const isFrench = l.startsWith('fr');
+    const safeLang = isFrench ? 'fr' : l.includes('gb') || l.includes('uk') ? 'en-uk' : 'en';
+    // Natural-language style direction: makes Gemini TTS sound like a warm storyteller, not a GPS
+    const style = isFrench
+      ? 'Dis avec une voix chaleureuse, souriante et douce, comme une maîtresse qui parle à des enfants de 4 à 6 ans, avec de petites pauses naturelles'
+      : 'Say in a warm, smiling, gentle voice, like a kind teacher talking to children aged 4 to 6, with small natural pauses';
 
     let audioBase64: string | null = null;
     let mimeType = 'audio/wav';
@@ -23,7 +28,7 @@ export default async function handler(req: any, res: any) {
         const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash-tts',
-          contents: cleanText,
+          contents: `${style}: ${cleanText}`,
           config: {
             responseModalities: ['AUDIO'],
             speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: safeVoice } } },

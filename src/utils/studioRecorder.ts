@@ -15,6 +15,8 @@ export interface RecorderOptions {
   englishLearningConfig?: EnglishLearningConfig;
   getActiveLetter?: () => string | null;
   getActiveLetterIndex?: () => number | null;
+  /** Paints a complete custom frame (scene + artwork). When set, it replaces the built-in tablet layouts. */
+  sceneRenderer?: (ctx: CanvasRenderingContext2D, width: number, height: number) => void;
 }
 
 export interface RecordingResult {
@@ -141,6 +143,10 @@ export class StudioVideoRecorder {
     const ctx = this.recordingCtx;
     const cw = this.recordingCanvas.width;
     const ch = this.recordingCanvas.height;
+    if (this.options.sceneRenderer) {
+      this.options.sceneRenderer(ctx, cw, ch);
+      return;
+    }
     const src = this.options.sourceCanvas;
     const s = Math.min(cw / 1920, ch / 1080);
     const cursor = this.options.getCursorState ? this.options.getCursorState() : null;

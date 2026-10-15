@@ -18,7 +18,7 @@ const ai = new GoogleGenAI();
 
 // In-memory cache for audio snippets (letters, words, praises)
 const ttsAudioCache = new Map<string, { audioBase64: string; mimeType: string }>();
-let geminiQuotaExhaustedUntil = Date.now() + 11 * 60 * 60 * 1000; // Cooldown for current exhausted quota window
+let geminiQuotaExhaustedUntil = 0; // Gemini TTS is tried first; a cooldown is only set after a real 429
 
 // High-fidelity Text-To-Speech endpoint for English Learning & Video Audio Stream
 app.post('/api/tts', async (req, res) => {
@@ -37,9 +37,13 @@ app.post('/api/tts', async (req, res) => {
       ? voiceName
       : 'Aoede';
 
-    const safeLang = String(lang).toLowerCase().includes('gb') || String(lang).toLowerCase().includes('uk')
-      ? 'en-uk'
-      : 'en';
+    const langLower = String(lang).toLowerCase();
+    const isFrench = langLower.startsWith('fr');
+    const safeLang = isFrench ? 'fr' : langLower.includes('gb') || langLower.includes('uk') ? 'en-uk' : 'en';
+    // Natural-language style direction: makes Gemini TTS sound like a warm storyteller, not a GPS
+    const style = isFrench
+      ? 'Dis avec une voix chaleureuse, souriante et douce, comme une maîtresse qui parle à des enfants de 4 à 6 ans, avec de petites pauses naturelles'
+      : 'Say in a warm, smiling, gentle voice, like a kind teacher talking to children aged 4 to 6, with small natural pauses';
 
     const cacheKey = `${safeVoice}:${safeLang}:${cleanText.toLowerCase()}`;
     if (ttsAudioCache.has(cacheKey)) {
@@ -54,7 +58,7 @@ app.post('/api/tts', async (req, res) => {
       try {
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash-tts',
-          contents: cleanText,
+          contents: `${style}: ${cleanText}`,
           config: {
             responseModalities: ['AUDIO'],
             speechConfig: {

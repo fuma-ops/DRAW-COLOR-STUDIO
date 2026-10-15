@@ -1,6 +1,8 @@
 import { EnglishLearningConfig } from '../types';
 import { soundEngine } from './audioSynth';
 
+export type VoiceLang = 'en-US' | 'en-GB' | 'fr-FR';
+
 export interface VoiceStateListener {
   (state: { isSpeaking: boolean; currentText: string; activeLetter?: string }): void;
 }
@@ -62,15 +64,15 @@ export class EnglishVoiceEngine {
     } catch {}
   }
 
-  public getVoices(lang: 'en-US' | 'en-GB' = 'en-US'): SpeechSynthesisVoice[] {
+  public getVoices(lang: VoiceLang = 'en-US'): SpeechSynthesisVoice[] {
     if (!this.synth) return [];
     if (this.voices.length === 0) {
       this.loadVoices();
     }
-    const prefix = lang === 'en-GB' ? 'en-gb' : 'en-us';
+    const prefix = lang === 'en-GB' ? 'en-gb' : lang === 'fr-FR' ? 'fr' : 'en-us';
     const matches = this.voices.filter(v => v.lang.toLowerCase().replace('_', '-').startsWith(prefix));
     if (matches.length > 0) return matches;
-    return this.voices.filter(v => v.lang.toLowerCase().startsWith('en'));
+    return this.voices.filter(v => v.lang.toLowerCase().startsWith(lang === 'fr-FR' ? 'fr' : 'en'));
   }
 
   public getAllVoices(): SpeechSynthesisVoice[] {
@@ -80,7 +82,7 @@ export class EnglishVoiceEngine {
     return this.voices;
   }
 
-  public findBestVoice(lang: 'en-US' | 'en-GB' = 'en-US', preferredName?: string): SpeechSynthesisVoice | null {
+  public findBestVoice(lang: VoiceLang = 'en-US', preferredName?: string): SpeechSynthesisVoice | null {
     const list = this.getVoices(lang);
     if (preferredName) {
       const explicit = this.voices.find(v => v.name.toLowerCase() === preferredName.toLowerCase());
@@ -122,7 +124,7 @@ export class EnglishVoiceEngine {
   public async getOrFetchAudioBuffer(
     text: string,
     voiceName: string = 'Puck',
-    lang: 'en-US' | 'en-GB' = 'en-US'
+    lang: VoiceLang = 'en-US'
   ): Promise<AudioBuffer | null> {
     const key = `${voiceName}:${lang}:${text.trim().toLowerCase()}`;
     if (this.audioBufferCache.has(key)) {
@@ -154,7 +156,18 @@ export class EnglishVoiceEngine {
           const arrayBuf = base64ToArrayBuffer(data.audioBase64);
           const ctx = soundEngine.getAudioContext();
           if (ctx) {
-            const decoded = await ctx.decodeAudioData(arrayBuf);
+            let decoded: AudioBuffer;
+            const mime = String(data.mimeType || '');
+            if (/L16|pcm/i.test(mime)) {
+              // Gemini TTS returns raw 16-bit mono PCM (no file header): build the buffer by hand
+              const rate = Number((/rate=(\d+)/i.exec(mime) || [])[1]) || 24000;
+              const samples = new Int16Array(arrayBuf, 0, Math.floor(arrayBuf.byteLength / 2));
+              decoded = ctx.createBuffer(1, samples.length, rate);
+              const channel = decoded.getChannelData(0);
+              for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 32768;
+            } else {
+              decoded = await ctx.decodeAudioData(arrayBuf);
+            }
             this.audioBufferCache.set(key, decoded);
             return decoded;
           }
@@ -212,6 +225,32 @@ export class EnglishVoiceEngine {
     } catch {}
   }
 
+  /**
+   * Downloads the narrator audio for many lines ahead of time (a few at a time),
+   * so the tutorial / video never pauses to wait for a voice and every line is in the recording.
+   */
+  public async prefetchLines(
+    lines: string[],
+    voiceName: string,
+    lang: VoiceLang,
+    onProgress?: (done: number, total: number) => void
+  ): Promise<void> {
+    const unique = Array.from(new Set(lines.map(l => l.trim()).filter(Boolean)));
+    let done = 0;
+    const queue = [...unique];
+    const worker = async () => {
+      while (queue.length) {
+        const line = queue.shift()!;
+        try {
+          await this.getOrFetchAudioBuffer(line, voiceName, lang);
+        } catch {}
+        done++;
+        if (onProgress) onProgress(done, unique.length);
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+  }
+
   public isVoiceSpeaking(): boolean {
     return this.isSpeaking;
   }
@@ -248,7 +287,7 @@ export class EnglishVoiceEngine {
   public async speak(
     text: string,
     options: {
-      lang?: 'en-US' | 'en-GB';
+      lang?: VoiceLang;
       preferredVoiceName?: string;
       rate?: number;
       pitch?: number;

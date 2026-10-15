@@ -987,6 +987,14 @@ class SoundEngine {
     }
   }
 
+  /** Lowers the background music while the narrator speaks, then brings it back. */
+  public duckMusic(duck: boolean) {
+    if (this.musicMasterGain && this.ctx && this.isMusicPlaying) {
+      const target = duck ? this.musicVolume * 0.3 : this.musicVolume;
+      this.musicMasterGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.25);
+    }
+  }
+
   public stopRelaxingMusic() {
     if (!this.isMusicPlaying) return;
     this.isMusicPlaying = false;

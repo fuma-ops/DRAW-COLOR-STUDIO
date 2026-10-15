@@ -21,6 +21,9 @@ import { hapticsEngine } from '../utils/haptics';
 import { KawaiiArtistStylus } from './KawaiiArtistStylus';
 import { VirtualCursorState } from '../utils/autoColorBot';
 import { StudioVideoRecorder, RecordingResult } from '../utils/studioRecorder';
+import { englishVoiceEngine } from '../utils/englishVoiceEngine';
+import { buildTutorialScript } from '../utils/kidScript';
+import { drawKidScene, getPaperRect, drawPencilCursor, SceneState } from '../utils/kidScene';
 import {
   Play,
   Square,
@@ -105,6 +108,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   const [activeGlitterContour, setActiveGlitterContour] = useState<{
     path: string;
     center: { x: number; y: number };
+    top: number;
     id: string;
   } | null>(null);
 
@@ -119,6 +123,30 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
 
   // Video Recorder
   const recorderRef = useRef<StudioVideoRecorder | null>(null);
+
+  // Cute stage (background scene), dotted-guide highlight and narration helpers
+  const stageBoxRef = useRef<HTMLDivElement | null>(null);
+  const stageCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const highlightCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const highlightRef = useRef<{ paths: string[]; mode: 'off' | 'preview' | 'drawing' }>({ paths: [], mode: 'off' });
+  const captionRef = useRef<string>('');
+  const activeColorRef = useRef<string | null>(null);
+  const guideImgRef = useRef<HTMLImageElement | null>(null);
+  const cursorRef = useRef<VirtualCursorState | null>(null);
+  const glitterRef = useRef<{ path: string; center: { x: number; y: number }; top: number; id: string } | null>(null);
+  const liveRef = useRef<{
+    phase: 'idle' | 'draw' | 'color' | 'spelling' | 'finished';
+    title: string;
+    emoji: string;
+    stepText: string;
+    progressTotal: number;
+    progressDone: number;
+    palette: string[];
+    dottedOpacity: number;
+    spelling: { chars: string[]; active: number | null; all: boolean };
+  } | null>(null);
+  const [isPreparingVoice, setIsPreparingVoice] = useState<boolean>(false);
+  const [voiceProgress, setVoiceProgress] = useState<{ done: number; total: number } | null>(null);
 
   // Cancellation and loop control
   const isLoopCancelledRef = useRef<boolean>(false);
@@ -150,12 +178,76 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   useEffect(() => {
     const c = canvasRef.current;
     const pig = pigmentCanvasRef.current;
+    const hl = highlightCanvasRef.current;
     if (c && pig) {
       c.width = 800;
       c.height = 800;
       pig.width = 800;
       pig.height = 800;
     }
+    if (hl) {
+      hl.width = 800;
+      hl.height = 800;
+    }
+  }, []);
+
+  // Dotted guide image used when filming
+  useEffect(() => {
+    const img = new Image();
+    img.onload = () => {
+      guideImgRef.current = img;
+    };
+    img.src = assets.dottedGuideUrl;
+  }, [assets.dottedGuideUrl]);
+
+  // Animation loop: paints the cute stage background and the pulsing dotted-shape highlight
+  useEffect(() => {
+    let raf = 0;
+    const loop = () => {
+      const t = performance.now() / 1000;
+
+      const box = stageBoxRef.current;
+      const stage = stageCanvasRef.current;
+      const state = makeSceneState(t);
+      if (box && stage && state) {
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        const W = Math.max(2, Math.round(box.clientWidth * dpr));
+        const H = Math.max(2, Math.round(box.clientHeight * dpr));
+        if (stage.width !== W || stage.height !== H) {
+          stage.width = W;
+          stage.height = H;
+        }
+        const sctx = stage.getContext('2d');
+        if (sctx) drawKidScene(sctx, W, H, state);
+      }
+
+      const hc = highlightCanvasRef.current;
+      if (hc) {
+        const hctx = hc.getContext('2d');
+        if (hctx) {
+          hctx.clearRect(0, 0, hc.width, hc.height);
+          const hl = highlightRef.current;
+          if (hl.mode !== 'off' && hl.paths.length) {
+            hctx.save();
+            hctx.lineCap = 'round';
+            hctx.lineJoin = 'round';
+            hctx.setLineDash([14, 12]);
+            hctx.lineDashOffset = -t * 38;
+            hctx.globalAlpha = hl.mode === 'preview' ? 0.65 + 0.35 * Math.sin(t * 6) : 0.35;
+            hctx.strokeStyle = '#FF4F9A';
+            hctx.lineWidth = hl.mode === 'preview' ? 11 : 8;
+            hctx.shadowColor = '#FF8CC0';
+            hctx.shadowBlur = 14;
+            for (const d of hl.paths) hctx.stroke(new Path2D(d));
+            hctx.restore();
+          }
+        }
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Cleanup speech & sound on unmount
@@ -163,6 +255,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     return () => {
       isLoopCancelledRef.current = true;
       isPlayingRef.current = false;
+      englishVoiceEngine.stop();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
@@ -172,59 +265,36 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   }, []);
 
   /**
-   * Speak helper with child voice pitch.
-   * STRICT REQUIREMENT: Returns a Promise that resolves ONLY when the speech finishes!
-   * Guarantees next part or drawing never begins before the voice finishes what she is saying.
+   * Narrator. Uses the studio voice (Gemini TTS through Web Audio), so it sounds warm AND is
+   * captured inside the exported video. The promise resolves only when the line has finished.
+   * Music is lowered while the narrator speaks, and the line is shown as a subtitle.
    */
+  const NARRATOR_VOICE = 'Aoede';
   const speakCheer = useCallback(
-    (text: string): Promise<void> => {
-      return new Promise<void>(resolve => {
-        if (!enableVoice || typeof window === 'undefined' || !('speechSynthesis' in window)) {
-          const words = text.split(/\s+/).length;
-          const waitMs = Math.max(1000, words * 320);
-          setTimeout(resolve, waitMs);
-          return;
-        }
-
-        try {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(text);
-          utterance.lang = lang === 'fr' ? 'fr-FR' : 'en-US';
-          utterance.rate = 0.88; // gentle, joyful, kid-friendly speed
-          utterance.pitch = 1.25; // cute, warm higher pitch for children
-
-          const voices = window.speechSynthesis.getVoices();
-          if (voices && voices.length > 0) {
-            const preferred = voices.find(v =>
-              lang === 'fr'
-                ? /french|amelie|thomas|aurelie|google français/i.test(v.name)
-                : /google us english|samantha|victoria|karen|tessa|fiona|natural|female|child|teacher/i.test(v.name)
-            );
-            if (preferred) {
-              utterance.voice = preferred;
-            }
-          }
-
-          let finished = false;
-          const onDone = () => {
-            if (!finished) {
-              finished = true;
-              resolve();
-            }
-          };
-
-          utterance.onend = onDone;
-          utterance.onerror = onDone;
-
-          const maxWait = Math.max(2400, text.length * 85);
-          setTimeout(onDone, maxWait);
-
-          window.speechSynthesis.speak(utterance);
-        } catch (err) {
-          console.warn('Speech synthesis error', err);
-          resolve();
-        }
-      });
+    async (text: string): Promise<void> => {
+      captionRef.current = text;
+      const words = text.split(/\s+/).length;
+      if (!enableVoice) {
+        await new Promise(r => setTimeout(r, Math.max(1400, words * 330)));
+        return;
+      }
+      soundEngine.duckMusic(true);
+      try {
+        await Promise.race([
+          englishVoiceEngine.speak(text, {
+            lang: lang === 'fr' ? 'fr-FR' : 'en-US',
+            preferredVoiceName: NARRATOR_VOICE,
+            rate: 1.0,
+            pitch: 1.2,
+          }),
+          // safety net: never freeze the tutorial if audio is blocked
+          new Promise(r => setTimeout(r, Math.max(7000, text.length * 170))),
+        ]);
+      } catch (err) {
+        console.warn('Narrator error', err);
+      } finally {
+        soundEngine.duckMusic(false);
+      }
     },
     [enableVoice, lang]
   );
@@ -239,12 +309,22 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       soundEngine.playCelebrationChime(true);
       hapticsEngine.triggerSuccess(true);
 
-      const contourPath = step.glitterContourPath || '';
+      // Trace the REAL outline of the shape that was just drawn / colored (not a box around it)
+      const contourPath =
+        'paths' in step && step.paths.length > 0
+          ? step.paths.map(p => p.d).join(' ')
+          : 'fillPath' in step && step.fillPath
+          ? step.fillPath
+          : step.glitterContourPath || '';
       const center = step.glitterCenter || { x: 400, y: 400 };
+      // Sparkles float just above the shape, so they never cover the face
+      const boxNums = (step.glitterContourPath || '').match(/-?\d+(\.\d+)?/g);
+      const top = boxNums && boxNums.length > 1 ? Number(boxNums[1]) : center.y - 60;
 
       setActiveGlitterContour({
         path: contourPath,
         center,
+        top,
         id: step.id,
       });
 
@@ -255,8 +335,10 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   );
 
   /**
-   * Progressive drawing of an SVG path with virtual stylus
-   * CRITICAL FIX: Splits subpaths and LIFTS PEN between disjoint strokes! Never drags lines across empty air!
+   * Progressive drawing of an SVG path with the virtual pencil.
+   * Moves like a human hand: starts gently, speeds up on straight parts, slows down in curves and
+   * near the end, with tiny speed variations and a small hesitation before each stroke.
+   * The pen is LIFTED between disjoint strokes, never dragged across empty paper.
    */
   const animateDrawPath = async (
     ctx: CanvasRenderingContext2D,
@@ -277,11 +359,14 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       }
     }
 
+    const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
+    const baseDelay = Math.max(6, 13 / speed);
+
     for (const points of subpathPointSets) {
       if (isLoopCancelledRef.current) break;
       if (points.length < 2) continue;
 
-      // 1. Lift pen and glide to the start of this sub-path
+      // 1. Move the lifted pencil to the start, then hesitate for a moment like a real hand
       setCursorState(prev => ({
         ...prev,
         x: points[0].x,
@@ -290,7 +375,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
         visible: true,
         color: strokeColor,
       }));
-      await new Promise(r => setTimeout(r, 60));
+      await wait(260 + Math.random() * 180);
 
       ctx.strokeStyle = strokeColor;
       ctx.lineWidth = strokeWidth;
@@ -299,13 +384,14 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
 
       soundEngine.startStroke('pencil', true);
 
-      // 2. Draw smoothly along the points of this subpath
-      for (let i = 1; i < points.length; i++) {
+      // 2. Draw along the points with natural speed changes
+      const n = points.length;
+      for (let i = 1; i < n; i++) {
         if (isLoopCancelledRef.current) break;
         const pPrev = points[i - 1];
         const pCurr = points[i];
 
-        // If distance between points > 22px, pen must NEVER drag across air! Lift pen!
+        // If distance between points > 22px, the pencil must never drag across air: lift it
         const dist = Math.hypot(pCurr.x - pPrev.x, pCurr.y - pPrev.y);
         if (dist > 22) {
           setCursorState(prev => ({ ...prev, x: pCurr.x, y: pCurr.y, isDrawing: false }));
@@ -317,20 +403,35 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
         ctx.lineTo(pCurr.x, pCurr.y);
         ctx.stroke();
 
+        // Pressure & speed: slow at both ends of the stroke, slower in tight curves, tiny jitter
+        const t = i / (n - 1);
+        const edge = Math.min(t, 1 - t);
+        const easeEnds = 1 + 1.8 * Math.max(0, 1 - edge / 0.12);
+        const a = points[Math.max(0, i - 3)];
+        const c = points[Math.min(n - 1, i + 3)];
+        const a1 = Math.atan2(pCurr.y - a.y, pCurr.x - a.x);
+        const a2 = Math.atan2(c.y - pCurr.y, c.x - pCurr.x);
+        let turn = Math.abs(a2 - a1);
+        if (turn > Math.PI) turn = 2 * Math.PI - turn;
+        const curve = 1 + Math.min(1.2, turn * 1.3);
+        const jitter = 0.85 + Math.random() * 0.3;
+        const delay = baseDelay * easeEnds * curve * jitter;
+
         setCursorState(prev => ({
           ...prev,
           x: pCurr.x,
           y: pCurr.y,
           isDrawing: true,
+          pressure: Math.min(0.85, 0.42 + 0.4 * Math.sin(Math.PI * t)),
         }));
 
-        const delay = Math.max(8, Math.round(24 / speed));
-        await new Promise(r => setTimeout(r, delay));
+        await wait(delay);
       }
 
       soundEngine.stopStroke();
       setCursorState(prev => ({ ...prev, isDrawing: false }));
-      await new Promise(r => setTimeout(r, 35));
+      // pencil lifts, tiny breath before the next stroke
+      await wait(140 + Math.random() * 160);
     }
   };
 
@@ -439,6 +540,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       await new Promise(r => setTimeout(r, 200));
     }
 
+    await prepareVoice();
     resetAllCanvases();
     isLoopCancelledRef.current = false;
     setIsPlaying(true);
@@ -461,30 +563,42 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     // ==========================================
     setCurrentPhase('draw');
 
+    // Narration script: varied, story-like lines (not the same slogan every time)
+    const script = buildTutorialScript(drawingSteps, coloringSteps, lang, lang === 'fr' ? 'petit ami' : 'friend');
+    activeColorRef.current = null;
+    highlightRef.current = { paths: [], mode: 'off' };
+    await speakCheer(script.welcome);
+    await new Promise(r => setTimeout(r, 400));
+
     for (let sIdx = 0; sIdx < drawingSteps.length; sIdx++) {
       if (isLoopCancelledRef.current) break;
       setCurrentStepIndex(sIdx);
       const step = drawingSteps[sIdx];
 
-      const instruction = lang === 'fr' ? step.instructionFr : step.instructionEn;
+      const lines = script.draw[sIdx];
 
-      // CRITICAL REQUIREMENT: Make sure never start drawing before voice finishes!
-      await speakCheer(instruction);
+      // 1. The dotted shape lights up (pulsing) while the narrator explains what comes next
+      highlightRef.current = { paths: step.paths.map(p => p.d), mode: 'preview' };
+      await speakCheer(lines.intro);
       if (isLoopCancelledRef.current) break;
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 450));
 
-      // Animate drawing paths for this step exactly over the imported dots
+      // 2. The pencil follows the dots (voice is quiet, pencil sound only)
+      highlightRef.current = { paths: step.paths.map(p => p.d), mode: 'drawing' };
+      captionRef.current = '';
       for (const p of step.paths) {
         if (isLoopCancelledRef.current) break;
         await animateDrawPath(ctx, p.d, step.strokeColor, step.strokeWidth, p.points);
       }
+      highlightRef.current = { paths: [], mode: 'off' };
 
       if (isLoopCancelledRef.current) break;
 
+      // 3. Little celebration: glitter outline + a short reaction from the narrator
       setCompletedDrawSteps(prev => new Set([...prev, sIdx]));
-      await triggerPinkGlitterContour(step);
+      await Promise.all([triggerPinkGlitterContour(step), speakCheer(lines.outro)]);
 
-      await new Promise(r => setTimeout(r, 250));
+      await new Promise(r => setTimeout(r, 350));
     }
 
     if (isLoopCancelledRef.current) {
@@ -494,12 +608,8 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     }
 
     // DRAWING FINISHED CHEER
-    await speakCheer(
-      lang === 'fr'
-        ? "Hourra ! Notre dessin est prêt ! Maintenant, colorions !"
-        : "Hooray! Our drawing is ready! Now let's color it!"
-    );
-    await new Promise(r => setTimeout(r, 350));
+    await speakCheer(script.drawDone);
+    await new Promise(r => setTimeout(r, 450));
 
     // ==========================================
     // PHASE 2: AREA-BY-AREA COLORING
@@ -512,22 +622,28 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       setCurrentColorStepIndex(cIdx);
       const colorStep = coloringSteps[cIdx];
 
-      // Speak coloring instruction and wait for speech to finish!
-      const colInstruct = lang === 'fr' ? colorStep.instructionFr : colorStep.instructionEn;
-      await speakCheer(colInstruct);
+      const colorLines = script.color[cIdx];
+      activeColorRef.current = colorStep.colorHex; // its pencil lifts up in the tray
+
+      // The area to color pulses while the narrator names the color
+      highlightRef.current = { paths: [colorStep.fillPath], mode: 'preview' };
+      await speakCheer(colorLines.intro);
       if (isLoopCancelledRef.current) break;
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 300));
 
       // Animate progressive felt marker filling
+      highlightRef.current = { paths: [], mode: 'off' };
+      captionRef.current = '';
       await animateColorStep(pigCtx, colorStep);
 
       if (isLoopCancelledRef.current) break;
 
       setCompletedColorSteps(prev => new Set([...prev, cIdx]));
-      await triggerPinkGlitterContour(colorStep);
+      await Promise.all([triggerPinkGlitterContour(colorStep), speakCheer(colorLines.outro)]);
 
-      await new Promise(r => setTimeout(r, 250));
+      await new Promise(r => setTimeout(r, 300));
     }
+    activeColorRef.current = null;
 
     if (isLoopCancelledRef.current) {
       setIsPlaying(false);
@@ -542,11 +658,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
 
     const spellingLetters = lang === 'fr' ? BEE_SPELLING_FR : BEE_SPELLING_EN;
 
-    await speakCheer(
-      lang === 'fr'
-        ? "Maintenant, épelons ensemble !"
-        : "Now let's spell! Listen and repeat!"
-    );
+    await speakCheer(script.spellIntro);
     await new Promise(r => setTimeout(r, 300));
 
     for (let lIdx = 0; lIdx < spellingLetters.length; lIdx++) {
@@ -575,26 +687,26 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     soundEngine.playCelebrationChime(true);
     soundEngine.playFillSound(true, 'bubble_sparkle');
 
-    await speakCheer(
-      lang === 'fr'
-        ? "Bravo ! Tu es un super artiste !"
-        : "Awesome! B-E-E, Bee! You are a super artist!"
-    );
+    await speakCheer(script.spellDone);
 
     await new Promise(r => setTimeout(r, 1200));
     setIsWordSpellingGlow(false);
+    captionRef.current = '';
     setCurrentPhase('finished');
     setIsPlaying(false);
     isPlayingRef.current = false;
     setCursorState(prev => ({ ...prev, visible: false }));
 
-    // Stop recording if active
-    if (recorderRef.current && isRecording) {
+    // Stop recording if active. (Uses the recorder itself, not React state: this function was created
+    // BEFORE `isRecording` turned true, so the state value here is stale and the film was never finalized.)
+    if (recorderRef.current && recorderRef.current.getIsRecording()) {
       try {
+        soundEngine.playCelebrationChime(true);
+        await new Promise(r => setTimeout(r, 2500)); // hold the final "All done!" frame
         const result = await recorderRef.current.stop();
         setRecordedResult(result);
         setIsRecording(false);
-        soundEngine.playCelebrationChime(true);
+        recorderRef.current = null;
       } catch (e) {
         console.error('Error stopping video recording', e);
         setIsRecording(false);
@@ -603,20 +715,45 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   };
 
   /**
+   * Downloads every narrator line before the tutorial/video starts, so there are no silent gaps
+   * and the (recorded) voice is already in memory.
+   */
+  const prepareVoice = async () => {
+    if (!enableVoice) return;
+    setIsPreparingVoice(true);
+    try {
+      const script = buildTutorialScript(drawingSteps, coloringSteps, lang, lang === 'fr' ? 'petit ami' : 'friend');
+      await englishVoiceEngine.prefetchLines(
+        script.all,
+        NARRATOR_VOICE,
+        lang === 'fr' ? 'fr-FR' : 'en-US',
+        (done, total) => setVoiceProgress({ done, total })
+      );
+    } catch (err) {
+      console.warn('Voice preparation warning', err);
+    } finally {
+      setIsPreparingVoice(false);
+      setVoiceProgress(null);
+    }
+  };
+
+  /**
    * PRIMARY ACTION 2: "RECORD TUTO"
+   * The film = the cute kids scene + paper with dotted guide, pencil cursor, glitter and subtitles.
    */
   const startRecordingVideo = async () => {
     const canvas = canvasRef.current;
     const pigCanvas = pigmentCanvasRef.current;
     if (!canvas || !pigCanvas) return;
 
-    setIsRecording(true);
     setRecordedResult(null);
+    await prepareVoice();
+
+    setIsRecording(true);
 
     const compCanvas = document.createElement('canvas');
     compCanvas.width = 800;
     compCanvas.height = 800;
-    const compCtx = compCanvas.getContext('2d');
 
     const recorder = new StudioVideoRecorder({
       sourceCanvas: compCanvas,
@@ -624,17 +761,9 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       resolution: videoResolution,
       includeAudio: true,
       watermarkText: '🌸 Kawaii Kids Art Studio',
-      showWatermark: true,
-      includeCursor: true,
-      getCursorState: () => {
-        if (compCtx) {
-          compCtx.fillStyle = '#FFFFFF';
-          compCtx.fillRect(0, 0, 800, 800);
-          if (pigmentCanvasRef.current) compCtx.drawImage(pigmentCanvasRef.current, 0, 0);
-          if (canvasRef.current) compCtx.drawImage(canvasRef.current, 0, 0);
-        }
-        return cursorState;
-      },
+      showWatermark: false,
+      includeCursor: false,
+      sceneRenderer: (ctx, cw, ch) => renderVideoFrame(ctx, cw, ch),
     });
     recorderRef.current = recorder;
 
@@ -655,13 +784,18 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     isPlayingRef.current = false;
     setIsPlaying(false);
 
+    englishVoiceEngine.stop();
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
+    soundEngine.duckMusic(false);
     soundEngine.stopRelaxingMusic();
     soundEngine.stopStroke();
+    highlightRef.current = { paths: [], mode: 'off' };
+    captionRef.current = '';
+    activeColorRef.current = null;
 
-    if (recorderRef.current && isRecording) {
+    if (recorderRef.current && recorderRef.current.getIsRecording()) {
       recorderRef.current
         .stop()
         .then(result => {
@@ -823,6 +957,180 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   const currentStep = drawingSteps[currentStepIndex] || drawingSteps[0];
   const currentColorStep = coloringSteps[currentColorStepIndex] || coloringSteps[0];
   const spellingLetters = lang === 'fr' ? BEE_SPELLING_FR : BEE_SPELLING_EN;
+
+  // ---------------------------------------------------------------------------------------
+  // Cute scene state (shared by the live stage and the exported video)
+  // ---------------------------------------------------------------------------------------
+  const uniquePalette = (hexes: string[]): string[] => {
+    const toRgb = (h: string) => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+    const out: string[] = [];
+    for (const hex of hexes) {
+      const c = toRgb(hex);
+      if (!out.some(o => {
+        const d = toRgb(o);
+        return Math.abs(c[0] - d[0]) + Math.abs(c[1] - d[1]) + Math.abs(c[2] - d[2]) < 90;
+      })) out.push(hex);
+    }
+    return out.slice(0, 8);
+  };
+  const nearestHex = (palette: string[], hex: string | null): string | null => {
+    if (!hex || palette.length === 0) return null;
+    const toRgb = (h: string) => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+    const c = toRgb(hex);
+    let best = palette[0];
+    let bd = Infinity;
+    for (const p of palette) {
+      const d = toRgb(p);
+      const dist = Math.abs(c[0] - d[0]) + Math.abs(c[1] - d[1]) + Math.abs(c[2] - d[2]);
+      if (dist < bd) { bd = dist; best = p; }
+    }
+    return best;
+  };
+
+  const makeSceneState = (t: number): SceneState | null => {
+    const live = liveRef.current;
+    if (!live) return null;
+    return {
+      t,
+      phase: live.phase,
+      title: live.title,
+      emoji: live.emoji,
+      stepText: live.stepText,
+      caption: captionRef.current,
+      progressTotal: live.progressTotal,
+      progressDone: live.progressDone,
+      palette: live.palette,
+      activeColor: nearestHex(live.palette, activeColorRef.current),
+    };
+  };
+
+  /** One frame of the exported video: scene + paper (guide, highlight, paint, lines) + pencil + glitter + letters */
+  const renderVideoFrame = (ctx: CanvasRenderingContext2D, cw: number, ch: number) => {
+    const live = liveRef.current;
+    const sceneState = makeSceneState(performance.now() / 1000);
+    if (!live || !sceneState) return;
+    const paper = drawKidScene(ctx, cw, ch, sceneState);
+    const sc = paper.w / 800;
+    const u = Math.min(cw, ch) / 1080;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(paper.x, paper.y, paper.w, paper.h, 26 * u);
+    ctx.clip();
+
+    // 1. faint dotted guide (always visible, so viewers can see where the pen will go)
+    const g = guideImgRef.current;
+    if (g && g.complete && g.naturalWidth) {
+      const k = Math.min(paper.w / g.naturalWidth, paper.h / g.naturalHeight);
+      const gw = g.naturalWidth * k;
+      const gh = g.naturalHeight * k;
+      ctx.globalAlpha = live.dottedOpacity;
+      ctx.drawImage(g, paper.x + (paper.w - gw) / 2, paper.y + (paper.h - gh) / 2, gw, gh);
+      ctx.globalAlpha = 1;
+    }
+    // 2. pulsing highlight of the current shape, 3. colors, 4. pencil lines
+    for (const layer of [highlightCanvasRef.current, pigmentCanvasRef.current, canvasRef.current]) {
+      if (layer) ctx.drawImage(layer, paper.x, paper.y, paper.w, paper.h);
+    }
+
+    // 5. pink glitter outline when a shape is finished
+    const gl = glitterRef.current;
+    if (gl) {
+      ctx.save();
+      ctx.translate(paper.x, paper.y);
+      ctx.scale(sc, sc);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.shadowColor = '#FF69B4';
+      ctx.shadowBlur = 18;
+      ctx.strokeStyle = '#FF69B4';
+      ctx.lineWidth = 8;
+      ctx.setLineDash([16, 10]);
+      ctx.stroke(new Path2D(gl.path));
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = '#FDE047';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([8, 8]);
+      ctx.stroke(new Path2D(gl.path));
+      ctx.setLineDash([]);
+      ctx.font = '48px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('✨💖✨', gl.center.x, Math.max(56, gl.top - 6));
+      ctx.restore();
+    }
+
+    // 6. spelling letters
+    if (live.phase === 'spelling' || live.phase === 'finished') {
+      const chars = live.spelling.chars;
+      const tile = 78 * sc;
+      const gap = 14 * sc;
+      const totalW = chars.length * tile + (chars.length - 1) * gap;
+      const x0 = paper.x + (paper.w - totalW) / 2;
+      const y0 = paper.y + paper.h - tile - 26 * sc;
+      chars.forEach((chr, i) => {
+        const glowing = live.spelling.active === i || live.spelling.all;
+        ctx.save();
+        ctx.fillStyle = glowing ? '#FBBF24' : 'rgba(254, 243, 199, 0.95)';
+        if (glowing) { ctx.shadowColor = '#F59E0B'; ctx.shadowBlur = 24; }
+        ctx.beginPath();
+        ctx.roundRect(x0 + i * (tile + gap), y0 - (glowing ? 10 * sc : 0), tile, tile, 18 * sc);
+        ctx.fill();
+        ctx.restore();
+        ctx.fillStyle = '#78350F';
+        ctx.font = `900 ${44 * sc}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(chr, x0 + i * (tile + gap) + tile / 2, y0 + tile / 2 - (glowing ? 10 * sc : 0));
+      });
+    }
+
+    // 7. the pencil "hand"
+    const cur = cursorRef.current;
+    if (cur && cur.visible) {
+      drawPencilCursor(ctx, paper.x + cur.x * sc, paper.y + cur.y * sc, cur.color, 46 * sc, cur.isDrawing);
+    }
+    ctx.restore();
+  };
+
+  // Keep the shared refs up to date on every render
+  {
+    const live = currentPhase;
+    const isDraw = live === 'draw';
+    const isColor = live === 'color';
+    const total = isColor ? coloringSteps.length : drawingSteps.length;
+    liveRef.current = {
+      phase: currentPhase,
+      title:
+        live === 'color'
+          ? lang === 'fr' ? 'On colorie !' : "Let's color!"
+          : live === 'spelling'
+          ? lang === 'fr' ? 'On épelle !' : "Let's spell!"
+          : live === 'finished'
+          ? lang === 'fr' ? 'Bravo !' : 'All done!'
+          : lang === 'fr' ? 'Dessine avec moi !' : 'Draw with me!',
+      emoji: isDraw ? currentStep?.emoji || '🐝' : isColor ? '🎨' : live === 'spelling' ? '🔤' : live === 'finished' ? '🎉' : '🐝',
+      stepText: isDraw
+        ? `${lang === 'fr' ? 'Étape' : 'Step'} ${currentStepIndex + 1} ${lang === 'fr' ? 'sur' : 'of'} ${drawingSteps.length} · ${
+            lang === 'fr' ? currentStep?.partName : currentStep?.partNameEn
+          }`
+        : isColor
+        ? `${lang === 'fr' ? 'Coloriage' : 'Coloring'} ${currentColorStepIndex + 1} ${lang === 'fr' ? 'sur' : 'of'} ${coloringSteps.length}`
+        : '',
+      progressTotal: total,
+      progressDone: isDraw ? completedDrawSteps.size : isColor ? completedColorSteps.size : live === 'idle' ? 0 : total,
+      palette: uniquePalette(coloringSteps.map(c => c.colorHex)),
+      dottedOpacity,
+      spelling: { chars: spellingLetters.map(l => l.char), active: activeSpellingIndex, all: isWordSpellingGlow },
+    };
+    cursorRef.current = cursorState;
+    glitterRef.current = activeGlitterContour;
+  }
+
+  // Stage geometry follows the chosen video format (what you see = what you film)
+  const stageNominal = videoAspectRatio === '16:9' ? { w: 1920, h: 1080 } : videoAspectRatio === '9:16' ? { w: 1080, h: 1920 } : { w: 1080, h: 1080 };
+  const paperRect = getPaperRect(stageNominal.w, stageNominal.h);
+  const stageMax = videoAspectRatio === '16:9' ? 'max-w-[980px]' : videoAspectRatio === '9:16' ? 'max-w-[400px]' : 'max-w-[620px]';
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-amber-50 via-rose-50 to-sky-50 text-slate-800 flex flex-col relative select-none">
@@ -1030,7 +1338,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       {/* Main Studio Body */}
       <main className="flex-1 max-w-7xl mx-auto w-full p-4 sm:p-6 flex flex-col lg:flex-row items-center lg:items-start justify-center gap-6">
         {/* LEFT COLUMN: 1-IMAGE WORKFLOW & REFERENCES */}
-        <div className="w-full lg:w-[330px] flex flex-col gap-4">
+        <div className="w-full lg:w-[285px] shrink-0 flex flex-col gap-4">
           {/* 1-CLICK UPLOAD HERO CARD */}
           <div className="bg-gradient-to-br from-amber-500 to-rose-500 text-white p-4 rounded-3xl shadow-lg flex flex-col gap-2.5 relative overflow-hidden">
             <div className="flex items-center justify-between z-10">
@@ -1282,9 +1590,9 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
         </div>
 
         {/* CENTER COLUMN: DRAWING CANVAS WITH GLITTER CONTOUR OVERLAY & VIRTUAL PEN */}
-        <div className="flex flex-col items-center">
+        <div className="flex flex-col items-center flex-1 min-w-0 w-full">
           {/* Active Voice Prompt Indicator */}
-          <div className="w-full max-w-[540px] mb-3 bg-white/95 rounded-2xl p-3 shadow-sm border border-amber-200 flex items-center justify-between gap-3">
+          <div className={`w-full ${stageMax} mb-3 bg-white/95 rounded-2xl p-3 shadow-sm border border-amber-200 flex items-center justify-between gap-3`}>
             <div className="flex items-center gap-3">
               <span className="text-3xl animate-bounce">
                 {currentPhase === 'draw'
@@ -1342,10 +1650,25 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
             </button>
           </div>
 
-          {/* Interactive Canvas Container */}
+          {/* CUTE STAGE: pastel scene (pencils, clouds, stars...) around the paper = exactly what the video shows */}
+          <div
+            ref={stageBoxRef}
+            className={`relative w-full ${stageMax} rounded-3xl overflow-hidden shadow-xl`}
+            style={{ aspectRatio: `${stageNominal.w} / ${stageNominal.h}` }}
+          >
+            <canvas ref={stageCanvasRef} className="absolute inset-0 w-full h-full" />
+
+          {/* Interactive Canvas Container (the paper) */}
           <div
             ref={containerRef}
-            className="relative w-[340px] h-[340px] sm:w-[500px] sm:h-[500px] md:w-[540px] md:h-[540px] bg-white rounded-3xl shadow-xl border-4 border-amber-300 overflow-hidden flex items-center justify-center touch-none select-none"
+            className="absolute overflow-hidden flex items-center justify-center touch-none select-none"
+            style={{
+              left: `${(paperRect.x / stageNominal.w) * 100}%`,
+              top: `${(paperRect.y / stageNominal.h) * 100}%`,
+              width: `${(paperRect.w / stageNominal.w) * 100}%`,
+              height: `${(paperRect.h / stageNominal.h) * 100}%`,
+              borderRadius: '2.4%',
+            }}
           >
             {/* 1. Underlying Dotted Guide Image */}
             <img
@@ -1358,6 +1681,14 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
             {/* 2. Pigment / Marker Color Fill Layer (Strictly behind lines) */}
             <canvas
               ref={pigmentCanvasRef}
+              width={800}
+              height={800}
+              className="absolute inset-0 w-full h-full pointer-events-none"
+            />
+
+            {/* 2b. Pulsing dotted highlight of the shape about to be drawn / colored */}
+            <canvas
+              ref={highlightCanvasRef}
               width={800}
               height={800}
               className="absolute inset-0 w-full h-full pointer-events-none"
@@ -1410,14 +1741,14 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
                 </svg>
 
                 <div
-                  className="absolute pointer-events-none transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center"
+                  className="absolute pointer-events-none transform -translate-x-1/2 -translate-y-full flex items-center justify-center"
                   style={{
                     left: `${(activeGlitterContour.center.x / 800) * 100}%`,
-                    top: `${(activeGlitterContour.center.y / 800) * 100}%`,
+                    top: `${(Math.max(30, activeGlitterContour.top - 6) / 800) * 100}%`,
                   }}
                 >
                   <div className="relative">
-                    <span className="text-4xl animate-bounce drop-shadow-[0_0_12px_#ff69b4]">
+                    <span className="text-2xl animate-bounce drop-shadow-[0_0_12px_#ff69b4]">
                       ✨💖✨
                     </span>
                   </div>
@@ -1483,8 +1814,23 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
             )}
           </div>
 
+            {isPreparingVoice && (
+              <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-white/80 backdrop-blur-sm">
+                <span className="text-5xl animate-bounce">🎙️</span>
+                <p className="font-black text-pink-600 text-lg">
+                  {lang === 'fr' ? 'Préparation de la voix…' : 'Warming up the narrator…'}
+                </p>
+                {voiceProgress && (
+                  <p className="text-xs font-bold text-slate-500">
+                    {voiceProgress.done} / {voiceProgress.total}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Quick canvas controls */}
-          <div className="w-full max-w-[540px] mt-3 flex items-center justify-between text-xs text-slate-500">
+          <div className={`w-full ${stageMax} mt-3 flex items-center justify-between text-xs text-slate-500`}>
             <span className="flex items-center gap-1 font-bold">
               <Star className="w-3.5 h-3.5 text-amber-500" />
               Gentle step-by-step drawing & magic filling
@@ -1499,7 +1845,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
         </div>
 
         {/* RIGHT COLUMN: VIDEO EXPORT & PALETTE */}
-        <div className="w-full lg:w-[320px] flex flex-col gap-4">
+        <div className="w-full lg:w-[275px] shrink-0 flex flex-col gap-4">
           {/* VIDEO EXPORT CARD */}
           <div className="bg-white rounded-3xl p-5 shadow-sm border border-slate-200 flex flex-col gap-3">
             <div className="flex items-center justify-between">
