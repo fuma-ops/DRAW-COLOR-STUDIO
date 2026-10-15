@@ -117,25 +117,11 @@ const INTROS: Record<Lang, Record<Kind, string[]>> = {
   },
 };
 
+// A SMALL bank on purpose: every distinct line costs one voice request (free tier = 10/day/model/project),
+// while repeated lines come from the cache for free.
 const OUTROS: Record<Lang, string[]> = {
-  en: [
-    "Ta-da! Look at that! Beautiful!",
-    "Yay! Wonderful!",
-    "Woohoo! Great job!",
-    "Perfect! You're so good at this!",
-    "Ooh, so pretty! Nice work, little artist!",
-    "Hooray! High five!",
-    "Wow! You did it!",
-  ],
-  fr: [
-    "Tada ! Regarde ça ! Magnifique !",
-    "Youpi ! Merveilleux !",
-    "Hourra ! Bravo !",
-    "Parfait ! Tu es trop fort !",
-    "Oh, c'est tellement joli ! Joli travail, petit artiste !",
-    "Hourra ! Tape-moi dans la main !",
-    "Waouh ! Tu as réussi !",
-  ],
+  en: ["Ta-da! Look at that! Beautiful!", "Yay! Wonderful!", "Woohoo! Great job!", "Wow! You did it!"],
+  fr: ["Tada ! Regarde ça ! Magnifique !", "Youpi ! Merveilleux !", "Hourra ! Bravo !", "Waouh ! Tu as réussi !"],
 };
 
 const COLOR_INTROS: Record<Lang, string[]> = {
@@ -153,9 +139,10 @@ const COLOR_INTROS: Record<Lang, string[]> = {
   ],
 };
 
-const COLOR_OUTROS: Record<Lang, string[]> = {
-  en: ["So pretty!", "Lovely!", "Ooh, look at that color!", "Yummy colors!", "Beautiful!"],
-  fr: ["Tellement joli !", "Adorable !", "Oh, regarde cette couleur !", "De bien jolies couleurs !", "Magnifique !"],
+// Used when a color has already been introduced by name (the same yellow is used on many shapes)
+const COLOR_AGAIN: Record<Lang, string[]> = {
+  en: ["Another one! Keep going!", "You're doing great!", "Almost there!"],
+  fr: ["Encore une ! Continue !", "Tu fais ça très bien !", "On y est presque !"],
 };
 
 const COLOR_NAMES_FR: Record<string, string> = {
@@ -232,13 +219,22 @@ export function buildTutorialScript(
     };
   });
 
-  // Voice calls are limited on the free tier, so only every 2nd color gets a spoken reaction
-  const color: StepLines[] = coloringSteps.map((step, idx) => {
+  // Voice requests are limited on the free tier: a color is introduced BY NAME only the first time it appears;
+  // later shapes of the same color get a short line from a tiny reusable bank.
+  const seenColors = new Set<string>();
+  const color: StepLines[] = coloringSteps.map(step => {
+    const key = step.colorNameEn;
+    const first = !seenColors.has(key);
+    seenColors.add(key);
     const cname =
       lang === 'fr' ? COLOR_NAMES_FR[step.colorNameEn] || step.colorNameEn.toLowerCase() : step.colorNameEn.toLowerCase();
+    const hash = Array.from(key).reduce((n, ch) => n + ch.charCodeAt(0), 0);
+    const templates = COLOR_INTROS[lang];
     return {
-      intro: { text: pick(COLOR_INTROS[lang], 'ci').replace('{c}', cname), style: 'dreamy' },
-      outro: { text: idx % 2 === 1 ? pick(COLOR_OUTROS[lang], 'co') : '', style: 'delighted' },
+      intro: first
+        ? { text: templates[hash % templates.length].replace('{c}', cname), style: 'dreamy' }
+        : { text: pick(COLOR_AGAIN[lang], 'again'), style: 'delighted' },
+      outro: { text: '', style: 'delighted' },
     };
   });
 

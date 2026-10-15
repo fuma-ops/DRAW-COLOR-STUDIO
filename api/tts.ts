@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { getGeminiClients } from '../src/utils/geminiClients.js';
 import { TTS_VOICES } from '../src/utils/ttsStyles.js';
 import { synthesizeSpeech, TTS_MODELS } from '../src/utils/geminiTts.js';
 
@@ -11,13 +11,13 @@ import { synthesizeSpeech, TTS_MODELS } from '../src/utils/geminiTts.js';
 
 export default async function handler(req: any, res: any) {
   if (req.method === 'GET') {
-    const hasKey = !!process.env.GEMINI_API_KEY;
-    if (req.query?.test !== '1') return res.json({ ok: true, hasKey, models: TTS_MODELS });
-    if (!hasKey) return res.json({ ok: false, hasKey, problem: 'GEMINI_API_KEY is not set in Vercel (Settings > Environment Variables), or the project was not redeployed after adding it.' });
+    const clients = getGeminiClients(process.env);
+    const hasKey = clients.length > 0;
+    if (req.query?.test !== '1') return res.json({ ok: true, hasKey, keys: clients.length, models: TTS_MODELS });
+    if (!hasKey) return res.json({ ok: false, hasKey, problem: 'No Gemini key (GEMINI_API_KEY) is set in Vercel (Settings > Environment Variables), or the project was not redeployed after adding it.' });
     const t = Date.now();
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const out = await synthesizeSpeech(ai, 'Hello little artist!', 'delighted', 'Puck', false);
-    return res.json({ ok: !!out.result, hasKey, ms: Date.now() - t, model: out.result?.model, errors: out.errors });
+    const out = await synthesizeSpeech(clients, 'Hello little artist!', 'delighted', 'Puck', false);
+    return res.json({ ok: !!out.result, hasKey, keys: clients.length, ms: Date.now() - t, model: out.result?.model, keyUsed: out.result ? out.result.keyIndex + 1 : undefined, errors: out.errors });
   }
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
   try {
@@ -36,9 +36,9 @@ export default async function handler(req: any, res: any) {
     let model: string | undefined;
     let reason = '';
 
-    if (process.env.GEMINI_API_KEY) {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const out = await synthesizeSpeech(ai, cleanText, styleKey, safeVoice, isFrench);
+    const clients = getGeminiClients(process.env);
+    if (clients.length > 0) {
+      const out = await synthesizeSpeech(clients, cleanText, styleKey, safeVoice, isFrench);
       if (out.result) {
         audioBase64 = out.result.audioBase64;
         mimeType = out.result.mimeType;
@@ -47,7 +47,7 @@ export default async function handler(req: any, res: any) {
         reason = out.errors.map(e => `${e.model}: ${e.error}`).join(' | ');
       }
     } else {
-      reason = 'GEMINI_API_KEY is not set on the server';
+      reason = 'No Gemini API key is set on the server';
     }
 
     if (!audioBase64) {

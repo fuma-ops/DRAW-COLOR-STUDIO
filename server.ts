@@ -5,6 +5,7 @@ import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 import { TTS_VOICES } from './src/utils/ttsStyles.js';
 import { synthesizeSpeech, TTS_MODELS } from './src/utils/geminiTts.js';
+import { getGeminiClients } from './src/utils/geminiClients.js';
 import { describeDrawing } from './src/utils/describeDrawing.js';
 
 dotenv.config();
@@ -17,18 +18,19 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '4mb' }));
 
-const ai = new GoogleGenAI();
+const clients = getGeminiClients(process.env);
+const ai = clients[0] || new GoogleGenAI({ apiKey: 'missing' });
 
 // In-memory cache for audio snippets (letters, words, praises)
 const ttsAudioCache = new Map<string, { audioBase64: string; mimeType: string }>();
 
 // Quick diagnostics: /api/tts (status) and /api/tts?test=1 (runs one real voice call)
 app.get('/api/tts', async (req, res) => {
-  const hasKey = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY);
-  if (req.query.test !== '1') return res.json({ ok: true, hasKey, models: TTS_MODELS });
+  const hasKey = clients.length > 0;
+  if (req.query.test !== '1') return res.json({ ok: true, hasKey, keys: clients.length, models: TTS_MODELS });
   const t = Date.now();
-  const out = await synthesizeSpeech(ai, 'Hello little artist!', 'delighted', 'Puck', false);
-  return res.json({ ok: !!out.result, hasKey, ms: Date.now() - t, model: out.result?.model, errors: out.errors });
+  const out = await synthesizeSpeech(clients, 'Hello little artist!', 'delighted', 'Puck', false);
+  return res.json({ ok: !!out.result, hasKey, keys: clients.length, ms: Date.now() - t, model: out.result?.model, keyUsed: out.result ? out.result.keyIndex + 1 : undefined, errors: out.errors });
 });
 
 // High-fidelity Text-To-Speech endpoint for English Learning & Video Audio Stream
@@ -63,7 +65,7 @@ app.post('/api/tts', async (req, res) => {
     let model: string | undefined;
     let reason = '';
 
-    const out = await synthesizeSpeech(ai, cleanText, styleKey, safeVoice, isFrench);
+    const out = await synthesizeSpeech(clients, cleanText, styleKey, safeVoice, isFrench);
     if (out.result) {
       audioBase64 = out.result.audioBase64;
       mimeType = out.result.mimeType;

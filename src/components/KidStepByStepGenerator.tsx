@@ -554,13 +554,13 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
    * Run the whole step-by-step tutorial sequence
    * Strictly adheres to the user-ordered drawingSteps and dynamic coloringSteps!
    */
-  const runAutoStepSequence = async () => {
+  const runAutoStepSequence = async (skipPrepare = false) => {
     if (isPlayingRef.current) {
       stopAll();
       await new Promise(r => setTimeout(r, 200));
     }
 
-    await prepareVoice();
+    if (!skipPrepare) await prepareVoice();
     resetAllCanvases();
     isLoopCancelledRef.current = false;
     setIsPlaying(true);
@@ -730,25 +730,32 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     }
   };
 
-  const prepareVoice = async () => {
-    if (!enableVoice) return;
+  const prepareVoice = async (): Promise<{ total: number; bad: number }> => {
+    if (!enableVoice) return { total: 0, bad: 0 };
     setIsPreparingVoice(true);
+    let total = 0;
+    let bad = 0;
     try {
       const script = buildTutorialScript(drawingSteps, coloringSteps, lang, objectName);
+      total = new Set(script.all.map(l => `${l.style}|${l.text}`)).size;
       englishVoiceEngine.resetVoiceReport();
       await englishVoiceEngine.prefetchLines(
         script.all,
         narratorVoice,
         lang === 'fr' ? 'fr-FR' : 'en-US',
-        (done, total) => setVoiceProgress({ done, total })
+        (done, tot) => setVoiceProgress({ done, total: tot })
       );
       const rep = englishVoiceEngine.voiceReport;
-      if (rep.gemini > 0 && rep.fallback === 0 && rep.failed === 0) {
-        setVoiceStatus({ ok: true, text: `Gemini voice ✓ (${rep.gemini} lines${rep.lastModel ? ', ' + rep.lastModel : ''})` });
+      bad = rep.fallback + rep.failed;
+      if (bad === 0 && rep.gemini + rep.cached > 0) {
+        setVoiceStatus({
+          ok: true,
+          text: `Gemini voice ready ✓ ${total} lines (${rep.gemini} new · ${rep.cached} remembered from before)`,
+        });
       } else {
         setVoiceStatus({
           ok: false,
-          text: `Plain voice used (${rep.gemini} Gemini · ${rep.fallback} plain · ${rep.failed} errors). ${rep.lastReason}`.slice(0, 260),
+          text: `${bad} of ${total} lines will use the plain voice (${rep.gemini} Gemini · ${rep.cached} remembered). ${rep.lastReason} Tip: press 🎙️ Prepare voice again later (e.g. tomorrow); lines already done are remembered and cost nothing.`.slice(0, 360),
         });
       }
     } catch (err) {
@@ -757,6 +764,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       setIsPreparingVoice(false);
       setVoiceProgress(null);
     }
+    return { total, bad };
   };
 
   /**
@@ -769,7 +777,15 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     if (!canvas || !pigCanvas) return;
 
     setRecordedResult(null);
-    await prepareVoice();
+    const prep = await prepareVoice();
+    if (prep.bad > 0) {
+      const go = window.confirm(
+        lang === 'fr'
+          ? `${prep.bad} phrase(s) sur ${prep.total} utiliseront la voix simple (limite Gemini atteinte). Filmer quand même ?\n\nAstuce : annule, puis reviens plus tard (demain) et appuie sur « Prepare voice » : les phrases déjà faites sont mémorisées et ne coûtent rien.`
+          : `${prep.bad} of ${prep.total} lines will use the plain voice (Gemini limit reached). Record anyway?\n\nTip: cancel, then come back later (e.g. tomorrow) and press "Prepare voice": lines already done are remembered and cost nothing.`
+      );
+      if (!go) return;
+    }
 
     setIsRecording(true);
 
@@ -791,7 +807,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
 
     try {
       await recorder.start();
-      await runAutoStepSequence();
+      await runAutoStepSequence(true);
     } catch (err) {
       console.error('Recording initialization error', err);
       setIsRecording(false);
@@ -1324,7 +1340,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
           <div className="flex items-center gap-2.5">
             {/* BUTTON 1: LANCE LE TUTO */}
             <button
-              onClick={runAutoStepSequence}
+              onClick={() => runAutoStepSequence()}
               disabled={isRecording}
               className={`px-5 py-2.5 rounded-2xl font-black text-sm flex items-center gap-2 shadow-md transition-all active:scale-95 ${
                 isPlaying && !isRecording
@@ -1441,6 +1457,14 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
                 title="Runs one real voice call and tells you if the expressive Gemini voice works"
               >
                 🔊 Test voice
+              </button>
+              <button
+                onClick={() => void prepareVoice()}
+                disabled={isPlaying || isPreparingVoice}
+                className="text-xs font-bold px-2.5 py-1 rounded-xl bg-white border border-rose-200 text-rose-600 hover:bg-rose-50"
+                title="Downloads the narrator voice for this tutorial and remembers it, so filming costs no extra voice requests"
+              >
+                🎙️ Prepare voice
               </button>
               {voiceStatus && (
                 <span

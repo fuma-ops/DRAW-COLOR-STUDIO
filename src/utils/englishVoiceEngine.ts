@@ -17,6 +17,55 @@ function base64ToArrayBuffer(base64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+/**
+ * Permanent voice memory (IndexedDB): every narrator line is requested from Gemini ONCE, ever.
+ * Re-recording the same tutorial, or another drawing that shares lines (welcome, reactions,
+ * finale), costs 0 voice requests. This is what makes the free daily quota go a long way.
+ */
+const IDB_NAME = 'kid-voice-cache';
+const IDB_STORE = 'lines';
+function idbOpen(): Promise<IDBDatabase | null> {
+  return new Promise(resolve => {
+    try {
+      if (typeof indexedDB === 'undefined') return resolve(null);
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+async function idbGet(key: string): Promise<{ audioBase64: string; mimeType: string } | null> {
+  const db = await idbOpen();
+  if (!db) return null;
+  return new Promise(resolve => {
+    try {
+      const r = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+      r.onsuccess = () => resolve(r.result || null);
+      r.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+async function idbPut(key: string, value: { audioBase64: string; mimeType: string }): Promise<void> {
+  const db = await idbOpen();
+  if (!db) return;
+  await new Promise<void>(resolve => {
+    try {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 export class EnglishVoiceEngine {
   private synth: SpeechSynthesis | null = null;
   private voices: SpeechSynthesisVoice[] = [];
@@ -33,9 +82,11 @@ export class EnglishVoiceEngine {
   private currentSpeakId = 0;
 
   /** What kind of voice the server really delivered (so a robotic voice is never a mystery) */
-  public voiceReport = { gemini: 0, fallback: 0, failed: 0, lastReason: '', lastModel: '' };
+  public voiceReport = { gemini: 0, cached: 0, fallback: 0, failed: 0, lastReason: '', lastModel: '' };
+  /** plain-voice audio kept only for this session (never stored as if it were the good voice) */
+  private fallbackBuffers: Map<string, AudioBuffer> = new Map();
   public resetVoiceReport() {
-    this.voiceReport = { gemini: 0, fallback: 0, failed: 0, lastReason: '', lastModel: '' };
+    this.voiceReport = { gemini: 0, cached: 0, fallback: 0, failed: 0, lastReason: '', lastModel: '' };
   }
 
   constructor() {
@@ -131,19 +182,52 @@ export class EnglishVoiceEngine {
     text: string,
     voiceName: string = 'Puck',
     lang: VoiceLang = 'en-US',
-    style?: string
+    style?: string,
+    retryFallback = false
   ): Promise<AudioBuffer | null> {
     const key = `${voiceName}:${lang}:${style || ''}:${text.trim().toLowerCase()}`;
     if (this.audioBufferCache.has(key)) {
       return this.audioBufferCache.get(key)!;
+    }
+    // A plain-voice line is reused for playback, but preparing the voice tries Gemini again
+    if (!retryFallback && this.fallbackBuffers.has(key)) {
+      return this.fallbackBuffers.get(key)!;
     }
 
     if (this.pendingFetches.has(key)) {
       return this.pendingFetches.get(key)!;
     }
 
+    const decode = async (audioBase64: string, mimeType: string): Promise<AudioBuffer | null> => {
+      const arrayBuf = base64ToArrayBuffer(audioBase64);
+      const ctx = soundEngine.getAudioContext();
+      if (!ctx) return null;
+      if (/L16|pcm/i.test(mimeType)) {
+        // Gemini TTS can return raw 16-bit mono PCM (no file header): build the buffer by hand
+        const rate = Number((/rate=(\d+)/i.exec(mimeType) || [])[1]) || 24000;
+        const samples = new Int16Array(arrayBuf, 0, Math.floor(arrayBuf.byteLength / 2));
+        const decoded = ctx.createBuffer(1, samples.length, rate);
+        const channel = decoded.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 32768;
+        return decoded;
+      }
+      return ctx.decodeAudioData(arrayBuf);
+    };
+
     const fetchPromise = (async () => {
       try {
+        // 1. permanent voice memory: no request at all
+        const saved = await idbGet(key);
+        if (saved) {
+          const buf = await decode(saved.audioBase64, saved.mimeType);
+          if (buf) {
+            this.audioBufferCache.set(key, buf);
+            this.voiceReport.cached++;
+            return buf;
+          }
+        }
+
+        // 2. ask the server
         const resp = await fetch('/api/tts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -169,7 +253,8 @@ export class EnglishVoiceEngine {
         }
 
         const data = await resp.json();
-        if (data.source === 'fallback') {
+        const isFallback = data.source === 'fallback';
+        if (isFallback) {
           this.voiceReport.fallback++;
           this.voiceReport.lastReason = String(data.reason || 'Gemini voice unavailable');
         } else if (data.audioBase64) {
@@ -177,22 +262,14 @@ export class EnglishVoiceEngine {
           this.voiceReport.lastModel = String(data.model || '');
         }
         if (data.audioBase64) {
-          const arrayBuf = base64ToArrayBuffer(data.audioBase64);
-          const ctx = soundEngine.getAudioContext();
-          if (ctx) {
-            let decoded: AudioBuffer;
-            const mime = String(data.mimeType || '');
-            if (/L16|pcm/i.test(mime)) {
-              // Gemini TTS returns raw 16-bit mono PCM (no file header): build the buffer by hand
-              const rate = Number((/rate=(\d+)/i.exec(mime) || [])[1]) || 24000;
-              const samples = new Int16Array(arrayBuf, 0, Math.floor(arrayBuf.byteLength / 2));
-              decoded = ctx.createBuffer(1, samples.length, rate);
-              const channel = decoded.getChannelData(0);
-              for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 32768;
+          const decoded = await decode(data.audioBase64, String(data.mimeType || ''));
+          if (decoded) {
+            if (isFallback) {
+              this.fallbackBuffers.set(key, decoded); // this session only
             } else {
-              decoded = await ctx.decodeAudioData(arrayBuf);
+              this.audioBufferCache.set(key, decoded);
+              void idbPut(key, { audioBase64: data.audioBase64, mimeType: String(data.mimeType || '') });
             }
-            this.audioBufferCache.set(key, decoded);
             return decoded;
           }
         }
@@ -278,7 +355,7 @@ export class EnglishVoiceEngine {
       while (queue.length) {
         const line = queue.shift()!;
         try {
-          await this.getOrFetchAudioBuffer(line.text, voiceName, lang, line.style);
+          await this.getOrFetchAudioBuffer(line.text, voiceName, lang, line.style, true);
         } catch {}
         done++;
         if (onProgress) onProgress(done, unique.length);
