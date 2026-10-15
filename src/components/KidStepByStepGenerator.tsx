@@ -22,8 +22,9 @@ import { KawaiiArtistStylus } from './KawaiiArtistStylus';
 import { VirtualCursorState } from '../utils/autoColorBot';
 import { StudioVideoRecorder, RecordingResult } from '../utils/studioRecorder';
 import { englishVoiceEngine } from '../utils/englishVoiceEngine';
-import { buildTutorialScript } from '../utils/kidScript';
-import { drawKidScene, getPaperRect, drawPencilCursor, SceneState } from '../utils/kidScene';
+import { buildTutorialScript, StyledLine } from '../utils/kidScript';
+import { drawKidScene, drawCaption, getPaperRect, drawPencilCursor, drawMagicStars, SceneState } from '../utils/kidScene';
+import { TTS_VOICES } from '../utils/ttsStyles';
 import {
   Play,
   Square,
@@ -63,7 +64,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   onBackToStudio,
 }) => {
   // Step & Phase Tracking
-  const [currentPhase, setCurrentPhase] = useState<'idle' | 'draw' | 'color' | 'spelling' | 'finished'>('idle');
+  const [currentPhase, setCurrentPhase] = useState<'idle' | 'draw' | 'color' | 'finished'>('idle');
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
   const [currentColorStepIndex, setCurrentColorStepIndex] = useState<number>(0);
 
@@ -112,9 +113,6 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     id: string;
   } | null>(null);
 
-  // Spelling Letters Glow State
-  const [activeSpellingIndex, setActiveSpellingIndex] = useState<number | null>(null);
-  const [isWordSpellingGlow, setIsWordSpellingGlow] = useState<boolean>(false);
 
   // Canvases
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -135,16 +133,19 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   const cursorRef = useRef<VirtualCursorState | null>(null);
   const glitterRef = useRef<{ path: string; center: { x: number; y: number }; top: number; id: string } | null>(null);
   const liveRef = useRef<{
-    phase: 'idle' | 'draw' | 'color' | 'spelling' | 'finished';
-    title: string;
-    emoji: string;
-    stepText: string;
+    phase: 'idle' | 'draw' | 'color' | 'finished';
     progressTotal: number;
     progressDone: number;
     palette: string[];
     dottedOpacity: number;
-    spelling: { chars: string[]; active: number | null; all: boolean };
   } | null>(null);
+  const finaleStartRef = useRef<number | null>(null);
+  const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [isFinale, setIsFinale] = useState<boolean>(false);
+  const [narratorVoice, setNarratorVoice] = useState<string>('Puck');
+  // What the drawing is ("cup", "bee"...), known only for the presets or when the optional AI naming succeeded
+  const [objectNames, setObjectNames] = useState<{ en: string; fr: string }>({ en: 'bee', fr: 'abeille' });
+  const objectName = lang === 'fr' ? objectNames.fr : objectNames.en;
   const [isPreparingVoice, setIsPreparingVoice] = useState<boolean>(false);
   const [voiceProgress, setVoiceProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -219,6 +220,21 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
         }
         const sctx = stage.getContext('2d');
         if (sctx) drawKidScene(sctx, W, H, state);
+
+        const fx = fxCanvasRef.current;
+        if (fx) {
+          if (fx.width !== W || fx.height !== H) {
+            fx.width = W;
+            fx.height = H;
+          }
+          const fctx = fx.getContext('2d');
+          if (fctx) {
+            fctx.clearRect(0, 0, W, H);
+            if (finaleStartRef.current !== null) {
+              drawMagicStars(fctx, W, H, t, Math.min(1, (performance.now() - finaleStartRef.current) / 1200));
+            }
+          }
+        }
       }
 
       const hc = highlightCanvasRef.current;
@@ -269,9 +285,10 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
    * captured inside the exported video. The promise resolves only when the line has finished.
    * Music is lowered while the narrator speaks, and the line is shown as a subtitle.
    */
-  const NARRATOR_VOICE = 'Aoede';
   const speakCheer = useCallback(
-    async (text: string): Promise<void> => {
+    async (input: StyledLine | string): Promise<void> => {
+      const text = typeof input === 'string' ? input : input.text;
+      const style = typeof input === 'string' ? undefined : input.style;
       captionRef.current = text;
       const words = text.split(/\s+/).length;
       if (!enableVoice) {
@@ -283,12 +300,13 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
         await Promise.race([
           englishVoiceEngine.speak(text, {
             lang: lang === 'fr' ? 'fr-FR' : 'en-US',
-            preferredVoiceName: NARRATOR_VOICE,
+            preferredVoiceName: narratorVoice,
+            style,
             rate: 1.0,
             pitch: 1.2,
           }),
           // safety net: never freeze the tutorial if audio is blocked
-          new Promise(r => setTimeout(r, Math.max(7000, text.length * 170))),
+          new Promise(r => setTimeout(r, Math.max(8000, text.length * 190))),
         ]);
       } catch (err) {
         console.warn('Narrator error', err);
@@ -296,7 +314,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
         soundEngine.duckMusic(false);
       }
     },
-    [enableVoice, lang]
+    [enableVoice, lang, narratorVoice]
   );
 
   /**
@@ -526,8 +544,8 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     setCurrentStepIndex(0);
     setCurrentColorStepIndex(0);
     setActiveGlitterContour(null);
-    setActiveSpellingIndex(null);
-    setIsWordSpellingGlow(false);
+    finaleStartRef.current = null;
+    setIsFinale(false);
   };
 
   /**
@@ -564,7 +582,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     setCurrentPhase('draw');
 
     // Narration script: varied, story-like lines (not the same slogan every time)
-    const script = buildTutorialScript(drawingSteps, coloringSteps, lang, lang === 'fr' ? 'petit ami' : 'friend');
+    const script = buildTutorialScript(drawingSteps, coloringSteps, lang, objectName);
     activeColorRef.current = null;
     highlightRef.current = { paths: [], mode: 'off' };
     await speakCheer(script.welcome);
@@ -652,57 +670,30 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     }
 
     // ==========================================
-    // PHASE 3: SPELLING REPETITION WITH GLOWING LETTERS!
+    // FINALE: the finished artwork zooms in under a shower of dreamy stars, with a joyful congratulation
     // ==========================================
-    setCurrentPhase('spelling');
-
-    const spellingLetters = lang === 'fr' ? BEE_SPELLING_FR : BEE_SPELLING_EN;
-
-    await speakCheer(script.spellIntro);
-    await new Promise(r => setTimeout(r, 300));
-
-    for (let lIdx = 0; lIdx < spellingLetters.length; lIdx++) {
-      if (isLoopCancelledRef.current) break;
-      setActiveSpellingIndex(lIdx);
-      const letter = spellingLetters[lIdx];
-
-      soundEngine.playFillSound(true, 'bubble_sparkle');
-      hapticsEngine.triggerTap(true);
-
-      const letterSound = lang === 'fr' ? letter.soundFr : letter.soundEn;
-      await speakCheer(letterSound);
-
-      await new Promise(r => setTimeout(r, 250));
-    }
-
-    if (isLoopCancelledRef.current) {
-      setIsPlaying(false);
-      isPlayingRef.current = false;
-      return;
-    }
-
-    // ENTIRE WORD GLOWS TOGETHER
-    setActiveSpellingIndex(null);
-    setIsWordSpellingGlow(true);
+    activeColorRef.current = null;
+    highlightRef.current = { paths: [], mode: 'off' };
+    captionRef.current = '';
+    setCursorState(prev => ({ ...prev, visible: false }));
+    setCurrentPhase('finished');
+    finaleStartRef.current = performance.now();
+    setIsFinale(true);
     soundEngine.playCelebrationChime(true);
     soundEngine.playFillSound(true, 'bubble_sparkle');
+    hapticsEngine.triggerSuccess(true);
+    await new Promise(r => setTimeout(r, 1200)); // let the zoom and the stars appear first
 
-    await speakCheer(script.spellDone);
-
-    await new Promise(r => setTimeout(r, 1200));
-    setIsWordSpellingGlow(false);
+    await speakCheer(script.finale);
+    await new Promise(r => setTimeout(r, 2600)); // hold the magical final picture
     captionRef.current = '';
-    setCurrentPhase('finished');
     setIsPlaying(false);
     isPlayingRef.current = false;
-    setCursorState(prev => ({ ...prev, visible: false }));
 
     // Stop recording if active. (Uses the recorder itself, not React state: this function was created
     // BEFORE `isRecording` turned true, so the state value here is stale and the film was never finalized.)
     if (recorderRef.current && recorderRef.current.getIsRecording()) {
       try {
-        soundEngine.playCelebrationChime(true);
-        await new Promise(r => setTimeout(r, 2500)); // hold the final "All done!" frame
         const result = await recorderRef.current.stop();
         setRecordedResult(result);
         setIsRecording(false);
@@ -722,10 +713,10 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     if (!enableVoice) return;
     setIsPreparingVoice(true);
     try {
-      const script = buildTutorialScript(drawingSteps, coloringSteps, lang, lang === 'fr' ? 'petit ami' : 'friend');
+      const script = buildTutorialScript(drawingSteps, coloringSteps, lang, objectName);
       await englishVoiceEngine.prefetchLines(
         script.all,
-        NARRATOR_VOICE,
+        narratorVoice,
         lang === 'fr' ? 'fr-FR' : 'en-US',
         (done, total) => setVoiceProgress({ done, total })
       );
@@ -818,8 +809,82 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
    * 4. Extracts enclosed coloring regions & sampled colors
    * 5. Opens Validation & Preview Step before animation!
    */
+  /**
+   * Optional: asks the AI what the drawing is and what each step draws (a cup -> "the cup", "the handle"...).
+   * If there is no API key or the call fails, the neutral names from the geometry analysis stay (never "head"/"body"
+   * for something that is not a creature).
+   */
+  const nameShapesWithAI = async (imageUrl: string, steps: KidDrawingStep[]) => {
+    try {
+      const img = new Image();
+      img.src = imageUrl;
+      await img.decode();
+      const c = document.createElement('canvas');
+      c.width = 512;
+      c.height = 512;
+      const cctx = c.getContext('2d');
+      if (!cctx) return;
+      cctx.fillStyle = '#FFFFFF';
+      cctx.fillRect(0, 0, 512, 512);
+      cctx.drawImage(img, 0, 0, 512, 512);
+      const jpeg = c.toDataURL('image/jpeg', 0.8);
+
+      const idByNumber = new Map<number, string>();
+      const payload = steps.map(st => {
+        let minX = 800, minY = 800, maxX = 0, maxY = 0;
+        for (const p of st.paths) {
+          for (const q of p.points || []) {
+            if (q.x < minX) minX = q.x;
+            if (q.x > maxX) maxX = q.x;
+            if (q.y < minY) minY = q.y;
+            if (q.y > maxY) maxY = q.y;
+          }
+        }
+        idByNumber.set(st.stepNumber, st.id);
+        const pct = (v: number) => Math.max(0, Math.min(100, Math.round(v / 8)));
+        return {
+          n: st.stepNumber,
+          currentName: st.partNameEn,
+          areaPct: Math.round((Math.max(0, maxX - minX) * Math.max(0, maxY - minY)) / 6400),
+          box: [pct(minX), pct(minY), pct(maxX - minX), pct(maxY - minY)] as [number, number, number, number],
+        };
+      });
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      const resp = await fetch('/api/describe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: jpeg, steps: payload }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data || !Array.isArray(data.steps)) return;
+
+      setObjectNames({ en: String(data.objectEn || ''), fr: String(data.objectFr || '') });
+      setDrawingSteps(prev =>
+        prev.map(st => {
+          const d = data.steps.find((x: any) => idByNumber.get(x.n) === st.id);
+          if (!d || !d.nameEn) return st;
+          return {
+            ...st,
+            partName: d.nameFr || d.nameEn,
+            partNameEn: d.nameEn,
+            aiIntroEn: d.introEn || undefined,
+            aiIntroFr: d.introFr || undefined,
+          };
+        })
+      );
+    } catch (err) {
+      console.warn('AI naming unavailable, keeping neutral step names', err);
+    }
+  };
+
   const processUploadedColoredImage = async (file: File) => {
     setIsProcessingSingleImage(true);
+    setObjectNames({ en: '', fr: '' });
     try {
       const dataUrl = await new Promise<string>((res, rej) => {
         const reader = new FileReader();
@@ -845,6 +910,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       setColoringSteps(processed.coloringSteps);
       setValidationReport(processed.validation);
       setIsValidatingWorkflow(true);
+      void nameShapesWithAI(processed.originalColoredUrl, processed.drawingSteps);
 
       soundEngine.playCelebrationChime(true);
     } catch (err) {
@@ -956,7 +1022,6 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
 
   const currentStep = drawingSteps[currentStepIndex] || drawingSteps[0];
   const currentColorStep = coloringSteps[currentColorStepIndex] || coloringSteps[0];
-  const spellingLetters = lang === 'fr' ? BEE_SPELLING_FR : BEE_SPELLING_EN;
 
   // ---------------------------------------------------------------------------------------
   // Cute scene state (shared by the live stage and the exported video)
@@ -993,9 +1058,6 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     return {
       t,
       phase: live.phase,
-      title: live.title,
-      emoji: live.emoji,
-      stepText: live.stepText,
       caption: captionRef.current,
       progressTotal: live.progressTotal,
       progressDone: live.progressDone,
@@ -1004,18 +1066,47 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
     };
   };
 
-  /** One frame of the exported video: scene + paper (guide, highlight, paint, lines) + pencil + glitter + letters */
+  /** Max zoom of the finished artwork during the finale (stays inside the frame) */
+  const finaleZoomMax = (cw: number, ch: number) => {
+    const paper = getPaperRect(cw, ch);
+    return Math.max(1, Math.min(1.32, (cw * 0.98) / paper.w, (ch * 0.96) / paper.h));
+  };
+
+  /** One frame of the exported video: scene + paper (guide, highlight, paint, lines) + pencil + glitter + finale */
   const renderVideoFrame = (ctx: CanvasRenderingContext2D, cw: number, ch: number) => {
     const live = liveRef.current;
-    const sceneState = makeSceneState(performance.now() / 1000);
+    const now = performance.now();
+    const t = now / 1000;
+    const sceneState = makeSceneState(t);
     if (!live || !sceneState) return;
-    const paper = drawKidScene(ctx, cw, ch, sceneState);
-    const sc = paper.w / 800;
+    const paper0 = drawKidScene(ctx, cw, ch, sceneState);
     const u = Math.min(cw, ch) / 1080;
+
+    // Finale: zoom the artwork in (ease-out), fade the dotted guide away, then shower dreamy stars
+    const fk = finaleStartRef.current === null ? 0 : Math.min(1, (now - finaleStartRef.current) / 1800);
+    const ease = 1 - Math.pow(1 - fk, 3);
+    const z = 1 + (finaleZoomMax(cw, ch) - 1) * ease;
+    const paper = {
+      x: paper0.x + paper0.w / 2 - (paper0.w * z) / 2,
+      y: paper0.y + paper0.h / 2 - (paper0.h * z) / 2,
+      w: paper0.w * z,
+      h: paper0.h * z,
+    };
+    if (z > 1.001) {
+      ctx.save();
+      ctx.shadowColor = 'rgba(120, 60, 90, 0.35)';
+      ctx.shadowBlur = 40 * u;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.beginPath();
+      ctx.roundRect(paper.x, paper.y, paper.w, paper.h, 26 * u * z);
+      ctx.fill();
+      ctx.restore();
+    }
+    const sc = paper.w / 800;
 
     ctx.save();
     ctx.beginPath();
-    ctx.roundRect(paper.x, paper.y, paper.w, paper.h, 26 * u);
+    ctx.roundRect(paper.x, paper.y, paper.w, paper.h, 26 * u * z);
     ctx.clip();
 
     // 1. faint dotted guide (always visible, so viewers can see where the pen will go)
@@ -1024,7 +1115,7 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       const k = Math.min(paper.w / g.naturalWidth, paper.h / g.naturalHeight);
       const gw = g.naturalWidth * k;
       const gh = g.naturalHeight * k;
-      ctx.globalAlpha = live.dottedOpacity;
+      ctx.globalAlpha = live.dottedOpacity * (1 - ease);
       ctx.drawImage(g, paper.x + (paper.w - gw) / 2, paper.y + (paper.h - gh) / 2, gw, gh);
       ctx.globalAlpha = 1;
     }
@@ -1060,68 +1151,31 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
       ctx.restore();
     }
 
-    // 6. spelling letters
-    if (live.phase === 'spelling' || live.phase === 'finished') {
-      const chars = live.spelling.chars;
-      const tile = 78 * sc;
-      const gap = 14 * sc;
-      const totalW = chars.length * tile + (chars.length - 1) * gap;
-      const x0 = paper.x + (paper.w - totalW) / 2;
-      const y0 = paper.y + paper.h - tile - 26 * sc;
-      chars.forEach((chr, i) => {
-        const glowing = live.spelling.active === i || live.spelling.all;
-        ctx.save();
-        ctx.fillStyle = glowing ? '#FBBF24' : 'rgba(254, 243, 199, 0.95)';
-        if (glowing) { ctx.shadowColor = '#F59E0B'; ctx.shadowBlur = 24; }
-        ctx.beginPath();
-        ctx.roundRect(x0 + i * (tile + gap), y0 - (glowing ? 10 * sc : 0), tile, tile, 18 * sc);
-        ctx.fill();
-        ctx.restore();
-        ctx.fillStyle = '#78350F';
-        ctx.font = `900 ${44 * sc}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(chr, x0 + i * (tile + gap) + tile / 2, y0 + tile / 2 - (glowing ? 10 * sc : 0));
-      });
-    }
-
-    // 7. the pencil "hand"
+    // 6. the pencil "hand"
     const cur = cursorRef.current;
     if (cur && cur.visible) {
       drawPencilCursor(ctx, paper.x + cur.x * sc, paper.y + cur.y * sc, cur.color, 46 * sc, cur.isDrawing);
     }
     ctx.restore();
+
+    // 7. subtitle stays readable on top of the zoomed artwork, then dreamy stars over everything
+    if (z > 1.001 && sceneState.caption) drawCaption(ctx, cw, ch, sceneState.caption);
+    if (finaleStartRef.current !== null) {
+      drawMagicStars(ctx, cw, ch, t, Math.min(1, (now - finaleStartRef.current) / 1200));
+    }
   };
 
   // Keep the shared refs up to date on every render
   {
-    const live = currentPhase;
-    const isDraw = live === 'draw';
-    const isColor = live === 'color';
+    const isDraw = currentPhase === 'draw';
+    const isColor = currentPhase === 'color';
     const total = isColor ? coloringSteps.length : drawingSteps.length;
     liveRef.current = {
       phase: currentPhase,
-      title:
-        live === 'color'
-          ? lang === 'fr' ? 'On colorie !' : "Let's color!"
-          : live === 'spelling'
-          ? lang === 'fr' ? 'On épelle !' : "Let's spell!"
-          : live === 'finished'
-          ? lang === 'fr' ? 'Bravo !' : 'All done!'
-          : lang === 'fr' ? 'Dessine avec moi !' : 'Draw with me!',
-      emoji: isDraw ? currentStep?.emoji || '🐝' : isColor ? '🎨' : live === 'spelling' ? '🔤' : live === 'finished' ? '🎉' : '🐝',
-      stepText: isDraw
-        ? `${lang === 'fr' ? 'Étape' : 'Step'} ${currentStepIndex + 1} ${lang === 'fr' ? 'sur' : 'of'} ${drawingSteps.length} · ${
-            lang === 'fr' ? currentStep?.partName : currentStep?.partNameEn
-          }`
-        : isColor
-        ? `${lang === 'fr' ? 'Coloriage' : 'Coloring'} ${currentColorStepIndex + 1} ${lang === 'fr' ? 'sur' : 'of'} ${coloringSteps.length}`
-        : '',
       progressTotal: total,
-      progressDone: isDraw ? completedDrawSteps.size : isColor ? completedColorSteps.size : live === 'idle' ? 0 : total,
+      progressDone: isDraw ? completedDrawSteps.size : isColor ? completedColorSteps.size : currentPhase === 'idle' ? 0 : total,
       palette: uniquePalette(coloringSteps.map(c => c.colorHex)),
       dottedOpacity,
-      spelling: { chars: spellingLetters.map(l => l.char), active: activeSpellingIndex, all: isWordSpellingGlow },
     };
     cursorRef.current = cursorState;
     glitterRef.current = activeGlitterContour;
@@ -1331,6 +1385,22 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
                 9:16 (Shorts/TikTok)
               </button>
             </div>
+
+            <label className="flex items-center gap-1.5 text-xs font-bold text-slate-600 bg-slate-100 rounded-xl px-2.5 py-1">
+              <span>🎙️ Voice</span>
+              <select
+                value={narratorVoice}
+                onChange={e => setNarratorVoice(e.target.value)}
+                disabled={isPlaying}
+                className="bg-transparent font-extrabold text-rose-600 outline-none cursor-pointer"
+              >
+                {TTS_VOICES.slice(0, 5).map(v => (
+                  <option key={v} value={v}>
+                    {{ Puck: 'Puck · upbeat', Zephyr: 'Zephyr · bright', Leda: 'Leda · youthful', Aoede: 'Aoede · breezy', Sulafat: 'Sulafat · warm' }[v] || v}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         </div>
       </div>
@@ -1591,65 +1661,6 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
 
         {/* CENTER COLUMN: DRAWING CANVAS WITH GLITTER CONTOUR OVERLAY & VIRTUAL PEN */}
         <div className="flex flex-col items-center flex-1 min-w-0 w-full">
-          {/* Active Voice Prompt Indicator */}
-          <div className={`w-full ${stageMax} mb-3 bg-white/95 rounded-2xl p-3 shadow-sm border border-amber-200 flex items-center justify-between gap-3`}>
-            <div className="flex items-center gap-3">
-              <span className="text-3xl animate-bounce">
-                {currentPhase === 'draw'
-                  ? currentStep?.emoji || '🟡'
-                  : currentPhase === 'color'
-                  ? currentColorStep?.emoji || '🎨'
-                  : '🐝'}
-              </span>
-              <div>
-                <span className="text-xs font-black uppercase tracking-wider text-amber-700 bg-amber-100 px-2 py-0.5 rounded-md">
-                  {currentPhase === 'draw'
-                    ? `Step ${currentStep?.stepNumber || 1} of ${drawingSteps.length}`
-                    : currentPhase === 'color'
-                    ? `Coloring ${currentColorStep?.stepNumber || 1} of ${coloringSteps.length}`
-                    : currentPhase === 'spelling'
-                    ? "Let's spell!"
-                    : 'All Done! 🎉'}
-                </span>
-                <p className="text-sm font-extrabold text-slate-800 mt-0.5">
-                  {currentPhase === 'draw'
-                    ? lang === 'fr'
-                      ? currentStep?.instructionFr
-                      : currentStep?.instructionEn
-                    : currentPhase === 'color'
-                    ? lang === 'fr'
-                      ? currentColorStep?.instructionFr
-                      : currentColorStep?.instructionEn
-                    : currentPhase === 'spelling'
-                    ? lang === 'fr'
-                      ? 'Répétons chaque lettre qui s’illumine !'
-                      : 'Repeat each letter as it glows!'
-                    : lang === 'fr'
-                    ? 'Bravo champion artistique !'
-                    : 'You are an awesome artist!'}
-                </p>
-              </div>
-            </div>
-
-            <button
-              onClick={() => {
-                const text =
-                  currentPhase === 'draw'
-                    ? lang === 'fr'
-                      ? currentStep?.instructionFr
-                      : currentStep?.instructionEn
-                    : lang === 'fr'
-                    ? currentColorStep?.instructionFr
-                    : currentColorStep?.instructionEn;
-                if (text) speakCheer(text);
-              }}
-              className="p-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200 transition-colors"
-              title="Repeat joyful voice"
-            >
-              <Volume2 className="w-4 h-4" />
-            </button>
-          </div>
-
           {/* CUTE STAGE: pastel scene (pencils, clouds, stars...) around the paper = exactly what the video shows */}
           <div
             ref={stageBoxRef}
@@ -1668,6 +1679,11 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
               width: `${(paperRect.w / stageNominal.w) * 100}%`,
               height: `${(paperRect.h / stageNominal.h) * 100}%`,
               borderRadius: '2.4%',
+              // Finale: the finished artwork gently zooms in on its own white sheet
+              transform: isFinale ? `scale(${finaleZoomMax(stageNominal.w, stageNominal.h)})` : 'none',
+              transition: 'transform 1.8s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 1.8s',
+              backgroundColor: isFinale ? '#FFFFFF' : 'transparent',
+              boxShadow: isFinale ? '0 18px 50px rgba(120, 60, 90, 0.35)' : 'none',
             }}
           >
             {/* 1. Underlying Dotted Guide Image */}
@@ -1770,49 +1786,10 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
               toolName={cursorState.toolName}
             />
 
-            {/* 6. SPELLING REPEAT GLOW OVERLAY */}
-            {(currentPhase === 'spelling' || currentPhase === 'finished') && (
-              <div className="absolute bottom-4 inset-x-4 z-30 flex flex-col items-center justify-center pointer-events-auto">
-                <div className="bg-white/95 backdrop-blur-md rounded-3xl p-3 px-6 shadow-2xl border-4 border-amber-400 flex flex-col items-center gap-2">
-                  <div className="flex items-center gap-1.5 text-xs font-black text-amber-700">
-                    <Sparkles className="w-4 h-4 text-amber-500 animate-spin" />
-                    <span>
-                      {lang === 'fr'
-                        ? 'Épelons et répétons ensemble !'
-                        : "Let's spell and repeat together!"}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {spellingLetters.map((letter, idx) => {
-                      const isGlowing =
-                        activeSpellingIndex === idx || isWordSpellingGlow;
-                      return (
-                        <button
-                          key={idx}
-                          onClick={() => {
-                            setActiveSpellingIndex(idx);
-                            speakCheer(lang === 'fr' ? letter.soundFr : letter.soundEn);
-                            soundEngine.playFillSound(true, 'bubble_sparkle');
-                          }}
-                          className={`w-12 h-14 rounded-2xl flex flex-col items-center justify-center text-2xl font-black transition-all transform ${
-                            isGlowing
-                              ? 'scale-125 bg-amber-400 text-amber-950 shadow-[0_0_20px_#f59e0b] ring-4 ring-amber-300 ring-offset-2 z-10 animate-bounce'
-                              : 'bg-amber-100/80 text-amber-800 hover:bg-amber-200 shadow-sm'
-                          }`}
-                        >
-                          <span>{letter.char}</span>
-                          <span className="text-[9px] font-bold opacity-70">
-                            {lang === 'fr' ? letter.soundFr : letter.soundEn}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
+
+            {/* Dreamy star shower for the finale */}
+            <canvas ref={fxCanvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-30" />
 
             {isPreparingVoice && (
               <div className="absolute inset-0 z-40 flex flex-col items-center justify-center gap-3 bg-white/80 backdrop-blur-sm">

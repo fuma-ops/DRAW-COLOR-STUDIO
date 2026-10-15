@@ -550,6 +550,9 @@ const STEP_LABELS: Record<string, StepLabel> = {
   tail: { name: 'Pointy Tail', voice: 'A pointy tail! Zip zip!', emoji: '📍' },
   feet: { name: 'Tiny Feet', voice: 'Tiny feet! Tap tap tap!', emoji: '🐾' },
   other: { name: 'Next Shape', voice: 'One more shape! You can do it!', emoji: '🌟' },
+  main: { name: 'Main Shape', voice: "Let's draw the big main shape!", emoji: '⭐' },
+  little: { name: 'Little Shapes', voice: 'Now the little shapes, one by one!', emoji: '🔹' },
+  dots: { name: 'Little Dots', voice: 'Little dots! Dot, dot, dot!', emoji: '⚫' },
   eyes: { name: 'Cute Eyes', voice: 'Two cute eyes! Dot dot!', emoji: '👀' },
   brows: { name: 'Little Eyebrows', voice: 'Little eyebrows! Swish swish!', emoji: '✨' },
   smile: { name: 'Happy Smile', voice: 'A big happy smile!', emoji: '😊' },
@@ -809,7 +812,22 @@ function buildDrawingSteps(data: Uint8ClampedArray, size: number): {
   for (const d of details) if (d.parent > 0) detailCount.set(d.parent, (detailCount.get(d.parent) || 0) + 1);
   const byArea = [...parts].sort((a, b) => b.area - a.area);
   const maxArea = byArea[0].area;
-  const head = [...parts].sort((a, b) => (detailCount.get(b.id) || 0) - (detailCount.get(a.id) || 0) || b.area - a.area)[0];
+
+  // A CHARACTER has a face: at least two similar dark dots (eyes) inside the same shape.
+  // Anything else (a cup, a house, a flower...) must NOT be called head / body / wing / feet.
+  const blobsByParent = new Map<number, DetailItem[]>();
+  for (const d of details) {
+    if (d.kind === 'blob' && d.parent > 0) blobsByParent.set(d.parent, [...(blobsByParent.get(d.parent) || []), d]);
+  }
+  let faceParent = -1;
+  blobsByParent.forEach((list, pid) => {
+    if (faceParent > 0 || list.length < 2) return;
+    const sizes = list.map(x => x.size);
+    if (Math.max(...sizes) / Math.max(1, Math.min(...sizes)) <= 2.2) faceParent = pid;
+  });
+  const isCharacter = faceParent > 0;
+
+  const head = (isCharacter && parts.find(p => p.id === faceParent)) || [...parts].sort((a, b) => (detailCount.get(b.id) || 0) - (detailCount.get(a.id) || 0) || b.area - a.area)[0];
   const touches = (a: DrawPart, b: DrawPart) =>
     a.minX - 14 <= b.maxX && b.minX - 14 <= a.maxX && a.minY - 14 <= b.maxY && b.minY - 14 <= a.maxY;
   const others = parts.filter(p => p !== head);
@@ -852,20 +870,7 @@ function buildDrawingSteps(data: Uint8ClampedArray, size: number): {
   const strokesOf = (ids: number[]) => ids.map(id => partStroke.get(id)).filter((s): s is TracedStroke => !!s);
   const idsOf = (cat: Cat) => parts.filter(p => catOf.get(p.id) === cat).sort((a, b) => a.centerX - b.centerX).map(p => p.id);
 
-  specs.push({ label: STEP_LABELS.head, strokes: strokesOf([head.id]), partIds: [head.id] });
-  if (body) specs.push({ label: STEP_LABELS.body, strokes: strokesOf([body.id]), partIds: [body.id] });
-  const wingIds = parts.filter(p => catOf.get(p.id) === 'wing').sort((a, b) => b.area - a.area).map(p => p.id);
-  for (const id of wingIds) specs.push({ label: STEP_LABELS.wing, strokes: strokesOf([id]), partIds: [id] });
-  const antennaIds = idsOf('antenna');
-  if (antennaIds.length) specs.push({ label: STEP_LABELS.antenna, strokes: strokesOf(antennaIds), partIds: antennaIds });
-  for (const id of idsOf('tail')) specs.push({ label: STEP_LABELS.tail, strokes: strokesOf([id]), partIds: [id] });
-  const feetIds = idsOf('feet');
-  if (feetIds.length) specs.push({ label: STEP_LABELS.feet, strokes: strokesOf(feetIds), partIds: feetIds });
-  for (const id of idsOf('other')) specs.push({ label: STEP_LABELS.other, strokes: strokesOf([id]), partIds: [id] });
-
-  // Details: eyes first, then thin lines (eyebrows / smile) from top to bottom
   const blobs = details.filter(d => d.kind === 'blob');
-  if (blobs.length) specs.push({ label: STEP_LABELS.eyes, strokes: blobs.flatMap(b => b.strokes), partIds: [] });
   const lines = details.filter(d => d.kind === 'line').sort((a, b) => a.cy - b.cy);
   const lineClusters: DetailItem[][] = [];
   for (const it of [...lines].sort((a, b) => b.size - a.size)) {
@@ -874,10 +879,46 @@ function buildDrawingSteps(data: Uint8ClampedArray, size: number): {
     else lineClusters.push([it]);
   }
   lineClusters.sort((a, b) => a[0].cy - b[0].cy);
-  lineClusters.forEach((cl, i) => {
-    const label = cl.length >= 2 ? STEP_LABELS.brows : i === lineClusters.length - 1 ? STEP_LABELS.smile : STEP_LABELS.detail;
-    specs.push({ label, strokes: cl.flatMap(c => c.strokes), partIds: [] });
-  });
+
+  if (isCharacter) {
+    specs.push({ label: STEP_LABELS.head, strokes: strokesOf([head.id]), partIds: [head.id] });
+    if (body) specs.push({ label: STEP_LABELS.body, strokes: strokesOf([body.id]), partIds: [body.id] });
+    const wingIds = parts.filter(p => catOf.get(p.id) === 'wing').sort((a, b) => b.area - a.area).map(p => p.id);
+    for (const id of wingIds) specs.push({ label: STEP_LABELS.wing, strokes: strokesOf([id]), partIds: [id] });
+    const antennaIds = idsOf('antenna');
+    if (antennaIds.length) specs.push({ label: STEP_LABELS.antenna, strokes: strokesOf(antennaIds), partIds: antennaIds });
+    for (const id of idsOf('tail')) specs.push({ label: STEP_LABELS.tail, strokes: strokesOf([id]), partIds: [id] });
+    const feetIds = idsOf('feet');
+    if (feetIds.length) specs.push({ label: STEP_LABELS.feet, strokes: strokesOf(feetIds), partIds: feetIds });
+    for (const id of idsOf('other')) specs.push({ label: STEP_LABELS.other, strokes: strokesOf([id]), partIds: [id] });
+
+    // Details: eyes first, then thin lines (eyebrows / smile) from top to bottom
+    if (blobs.length) specs.push({ label: STEP_LABELS.eyes, strokes: blobs.flatMap(b => b.strokes), partIds: [] });
+    lineClusters.forEach((cl, i) => {
+      const label = cl.length >= 2 ? STEP_LABELS.brows : i === lineClusters.length - 1 ? STEP_LABELS.smile : STEP_LABELS.detail;
+      specs.push({ label, strokes: cl.flatMap(c => c.strokes), partIds: [] });
+    });
+  } else {
+    // ---- GENERAL OBJECT: neutral wording, biggest shape first, similar small shapes together ----
+    const sorted = [...parts].sort((a, b) => b.area - a.area);
+    const bigs = sorted.filter(p => p.area >= maxArea * 0.15);
+    const smalls = sorted.filter(p => p.area < maxArea * 0.15);
+    bigs.forEach((p, i) =>
+      specs.push({ label: i === 0 ? STEP_LABELS.main : STEP_LABELS.other, strokes: strokesOf([p.id]), partIds: [p.id] })
+    );
+    const smallClusters: DrawPart[][] = [];
+    for (const p of smalls) {
+      const home = smallClusters.find(c => c[0].area / p.area <= 2.2 && p.area / c[0].area <= 2.2);
+      if (home) home.push(p);
+      else smallClusters.push([p]);
+    }
+    for (const cl of smallClusters) {
+      const ids = cl.sort((a, b) => a.centerX - b.centerX).map(p => p.id);
+      specs.push({ label: cl.length >= 2 ? STEP_LABELS.little : STEP_LABELS.other, strokes: strokesOf(ids), partIds: ids });
+    }
+    if (blobs.length) specs.push({ label: STEP_LABELS.dots, strokes: blobs.flatMap(b => b.strokes), partIds: [] });
+    lineClusters.forEach(cl => specs.push({ label: STEP_LABELS.detail, strokes: cl.flatMap(c => c.strokes), partIds: [] }));
+  }
 
   // Respect the step budget: fold the last steps together
   while (specs.length > MAX_DRAWING_STEPS) {
@@ -889,7 +930,7 @@ function buildDrawingSteps(data: Uint8ClampedArray, size: number): {
   const used = specs.filter(s => s.strokes.length > 0);
   used.forEach((s, idx) => s.partIds.forEach(pid => partRank.set(pid, idx)));
   // Black pupils are painted right after the "Cute Eyes" step has drawn them
-  const eyesRank = used.findIndex(s => s.label === STEP_LABELS.eyes);
+  const eyesRank = used.findIndex(s => s.label === STEP_LABELS.eyes || s.label === STEP_LABELS.dots);
   const blobFills = eyesRank >= 0 ? blobs.map(b => ({ pixels: b.pixels, rank: eyesRank })) : [];
 
   const steps: KidDrawingStep[] = used.map((s, idx) => {
@@ -930,10 +971,10 @@ function buildDrawingSteps(data: Uint8ClampedArray, size: number): {
 function describeColor(r: number, g: number, b: number): { hex: string; name: string; prompt: string } {
   const hex = rgbToHex(r, g, b);
   if (r < 45 && g < 45 && b < 45) return { hex, name: 'Midnight Black', prompt: 'Black pupils! Shiny eyes!' };
-  if (r < 110 && g < 90 && b < 90) return { hex, name: 'Dark Chocolate', prompt: 'Chocolate brown! Sweet stripes!' };
+  if (r < 110 && g < 90 && b < 90) return { hex, name: 'Dark Chocolate', prompt: 'Chocolate brown! Yummy!' };
   if (r > 195 && g > 175 && b < 125) return { hex, name: 'Honey Yellow', prompt: 'Sunny yellow! Paint paint!' };
-  if (r > 195 && g < 175 && b > 120) return { hex, name: 'Rosy Pink', prompt: 'Pretty pink! Rosy cheeks!' };
-  if (b > 175 && r < 205) return { hex, name: 'Pastel Sky Blue', prompt: 'Sky blue! Soft wings!' };
+  if (r > 195 && g < 175 && b > 120) return { hex, name: 'Rosy Pink', prompt: 'Pretty pink! So sweet!' };
+  if (b > 175 && r < 205) return { hex, name: 'Pastel Sky Blue', prompt: 'Sky blue! So fresh!' };
   if (r > 200 && g > 110 && b < 95) return { hex, name: 'Bright Orange', prompt: 'Bright orange! Warm colors!' };
   if (g > 165 && r < 140) return { hex, name: 'Mint Green', prompt: 'Mint green! Fresh colors!' };
   if (r > 130 && b > 160) return { hex, name: 'Dreamy Purple', prompt: 'Dreamy purple! Magic colors!' };

@@ -3,6 +3,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+import { buildTtsPrompt, TTS_VOICES } from './src/utils/ttsStyles';
+import { describeDrawing } from './src/utils/describeDrawing';
 
 dotenv.config();
 
@@ -12,7 +14,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '4mb' }));
 
 const ai = new GoogleGenAI();
 
@@ -23,7 +25,7 @@ let geminiQuotaExhaustedUntil = 0; // Gemini TTS is tried first; a cooldown is o
 // High-fidelity Text-To-Speech endpoint for English Learning & Video Audio Stream
 app.post('/api/tts', async (req, res) => {
   try {
-    const { text, voiceName = 'Puck', lang = 'en-US' } = req.body;
+    const { text, voiceName = 'Puck', lang = 'en-US', style: styleKey } = req.body;
     if (!text || typeof text !== 'string') {
       return res.status(400).json({ error: 'Text is required' });
     }
@@ -33,19 +35,14 @@ app.post('/api/tts', async (req, res) => {
       return res.status(400).json({ error: 'Empty text' });
     }
 
-    const safeVoice = ['Aoede', 'Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'].includes(voiceName)
+    const safeVoice = TTS_VOICES.includes(voiceName)
       ? voiceName
-      : 'Aoede';
+      : 'Puck';
 
     const langLower = String(lang).toLowerCase();
     const isFrench = langLower.startsWith('fr');
     const safeLang = isFrench ? 'fr' : langLower.includes('gb') || langLower.includes('uk') ? 'en-uk' : 'en';
-    // Natural-language style direction: makes Gemini TTS sound like a warm storyteller, not a GPS
-    const style = isFrench
-      ? 'Dis avec une voix chaleureuse, souriante et douce, comme une maîtresse qui parle à des enfants de 4 à 6 ans, avec de petites pauses naturelles'
-      : 'Say in a warm, smiling, gentle voice, like a kind teacher talking to children aged 4 to 6, with small natural pauses';
-
-    const cacheKey = `${safeVoice}:${safeLang}:${cleanText.toLowerCase()}`;
+    const cacheKey = `${safeVoice}:${safeLang}:${styleKey || ''}:${cleanText.toLowerCase()}`;
     if (ttsAudioCache.has(cacheKey)) {
       return res.json(ttsAudioCache.get(cacheKey));
     }
@@ -58,9 +55,10 @@ app.post('/api/tts', async (req, res) => {
       try {
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash-tts',
-          contents: `${style}: ${cleanText}`,
+          contents: buildTtsPrompt(cleanText, styleKey, isFrench),
           config: {
             responseModalities: ['AUDIO'],
+            temperature: 1.0,
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: {
@@ -118,6 +116,22 @@ app.post('/api/tts', async (req, res) => {
   } catch (err: any) {
     console.error('TTS Generation error:', err);
     return res.status(500).json({ error: err.message || 'TTS generation failed' });
+  }
+});
+
+// Optional AI naming of the drawing's shapes (works for any object, not only creatures)
+app.post('/api/describe', async (req, res) => {
+  try {
+    const { image, steps } = req.body || {};
+    if (typeof image !== 'string' || !Array.isArray(steps)) {
+      return res.status(400).json({ error: 'image and steps are required' });
+    }
+    const base64 = image.replace(/^data:image\/\w+;base64,/, '');
+    const result = await describeDrawing(ai, base64, steps.slice(0, 20));
+    if (!result) return res.status(502).json({ error: 'Could not describe the drawing' });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'describe failed' });
   }
 });
 

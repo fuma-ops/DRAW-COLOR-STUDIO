@@ -24,6 +24,9 @@ export interface KidDrawingStep {
   }[];
   glitterContourPath?: string;
   glitterCenter?: { x: number; y: number };
+  /** Optional spoken intro written by the AI for THIS object (e.g. "Now the handle of the cup!") */
+  aiIntroEn?: string;
+  aiIntroFr?: string;
 }
 
 export interface KidColoringStep {

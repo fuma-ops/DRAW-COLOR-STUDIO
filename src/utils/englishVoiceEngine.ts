@@ -124,9 +124,10 @@ export class EnglishVoiceEngine {
   public async getOrFetchAudioBuffer(
     text: string,
     voiceName: string = 'Puck',
-    lang: VoiceLang = 'en-US'
+    lang: VoiceLang = 'en-US',
+    style?: string
   ): Promise<AudioBuffer | null> {
-    const key = `${voiceName}:${lang}:${text.trim().toLowerCase()}`;
+    const key = `${voiceName}:${lang}:${style || ''}:${text.trim().toLowerCase()}`;
     if (this.audioBufferCache.has(key)) {
       return this.audioBufferCache.get(key)!;
     }
@@ -144,6 +145,7 @@ export class EnglishVoiceEngine {
             text: text.trim(),
             voiceName,
             lang,
+            style,
           }),
         });
 
@@ -230,19 +232,29 @@ export class EnglishVoiceEngine {
    * so the tutorial / video never pauses to wait for a voice and every line is in the recording.
    */
   public async prefetchLines(
-    lines: string[],
+    lines: Array<string | { text: string; style?: string }>,
     voiceName: string,
     lang: VoiceLang,
     onProgress?: (done: number, total: number) => void
   ): Promise<void> {
-    const unique = Array.from(new Set(lines.map(l => l.trim()).filter(Boolean)));
+    const seen = new Set<string>();
+    const unique: { text: string; style?: string }[] = [];
+    for (const l of lines) {
+      const item = typeof l === 'string' ? { text: l } : l;
+      const text = item.text.trim();
+      if (!text) continue;
+      const k = `${item.style || ''}|${text}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      unique.push({ text, style: item.style });
+    }
     let done = 0;
     const queue = [...unique];
     const worker = async () => {
       while (queue.length) {
         const line = queue.shift()!;
         try {
-          await this.getOrFetchAudioBuffer(line, voiceName, lang);
+          await this.getOrFetchAudioBuffer(line.text, voiceName, lang, line.style);
         } catch {}
         done++;
         if (onProgress) onProgress(done, unique.length);
@@ -292,6 +304,8 @@ export class EnglishVoiceEngine {
       rate?: number;
       pitch?: number;
       volume?: number;
+      /** emotion/delivery of the line (storyteller, excited, delighted, dreamy, amazed, celebrate) */
+      style?: string;
       activeLetter?: string;
       onStart?: () => void;
       onEnd?: () => void;
@@ -316,7 +330,7 @@ export class EnglishVoiceEngine {
     // 1. Try to fetch/retrieve Web Audio buffer (routes into soundEngine -> recorded in video!)
     let audioBuffer: AudioBuffer | null = null;
     try {
-      audioBuffer = await this.getOrFetchAudioBuffer(clean, voiceName, lang);
+      audioBuffer = await this.getOrFetchAudioBuffer(clean, voiceName, lang, options.style);
     } catch {}
 
     // Check if superseded while awaiting fetch

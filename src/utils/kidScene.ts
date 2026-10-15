@@ -14,11 +14,7 @@ export interface SceneRect {
 export interface SceneState {
   /** seconds, drives gentle animation (clouds, twinkling stars, bobbing bee) */
   t: number;
-  phase: 'idle' | 'draw' | 'color' | 'spelling' | 'finished';
-  title: string;
-  emoji: string;
-  /** e.g. "Step 3 of 10 · Soft Wing" */
-  stepText: string;
+  phase: 'idle' | 'draw' | 'color' | 'finished';
   /** subtitle shown at the bottom */
   caption: string;
   progressTotal: number;
@@ -44,15 +40,15 @@ function layoutOf(w: number, h: number): Layout {
 export function getPaperRect(w: number, h: number): SceneRect {
   const layout = layoutOf(w, h);
   if (layout === 'landscape') {
-    const size = Math.min(h * 0.66, w * 0.44);
-    return { x: (w - size) / 2, y: h * 0.2, w: size, h: size };
+    const size = Math.min(h * 0.74, w * 0.5);
+    return { x: (w - size) / 2, y: h * 0.115, w: size, h: size };
   }
   if (layout === 'portrait') {
-    const size = w * 0.88;
-    return { x: (w - size) / 2, y: h * 0.17, w: size, h: size };
+    const size = w * 0.94;
+    return { x: (w - size) / 2, y: h * 0.085, w: size, h: size };
   }
-  const size = Math.min(w, h) * 0.52;
-  return { x: (w - size) / 2, y: h * 0.21, w: size, h: size };
+  const size = Math.min(w, h) * 0.62;
+  return { x: (w - size) / 2, y: h * 0.1, w: size, h: size };
 }
 
 function star(ctx: CanvasRenderingContext2D, cx: number, cy: number, outer: number, inner: number, rot = -Math.PI / 2) {
@@ -157,6 +153,33 @@ function roundedText(ctx: CanvasRenderingContext2D, text: string, cx: number, cy
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, cx, cy);
+}
+
+/** Subtitle bar. Exported so the finale can draw it ON TOP of the zoomed artwork. */
+export function drawCaption(ctx: CanvasRenderingContext2D, w: number, h: number, caption: string) {
+  const layout = layoutOf(w, h);
+  const paper = getPaperRect(w, h);
+  const u = Math.min(w, h) / 1080;
+  if (caption) {
+    const capW = Math.min(w * 0.9, layout === 'landscape' ? paper.w * 2.0 : w * 0.9);
+    const capH = (layout === 'portrait' ? 120 : 84) * u;
+    const capY = layout === 'landscape' ? h - capH - 22 * u : paper.y + paper.h + 26 * u;
+    ctx.save();
+    ctx.shadowColor = 'rgba(120, 60, 90, 0.25)';
+    ctx.shadowBlur = 18 * u;
+    ctx.fillStyle = 'rgba(255,255,255,0.96)';
+    ctx.beginPath();
+    ctx.roundRect((w - capW) / 2, capY, capW, capH, capH * 0.36);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = '#FFC4DC';
+    ctx.lineWidth = 4 * u;
+    ctx.beginPath();
+    ctx.roundRect((w - capW) / 2, capY, capW, capH, capH * 0.36);
+    ctx.stroke();
+    roundedText(ctx, caption, w / 2, capY + capH / 2 + 2 * u, capW * 0.92, 40 * u, '#5B2A45');
+  }
+
 }
 
 export function drawKidScene(ctx: CanvasRenderingContext2D, w: number, h: number, st: SceneState): SceneRect {
@@ -290,7 +313,7 @@ export function drawKidScene(ctx: CanvasRenderingContext2D, w: number, h: number
     // bobbing bee + flowers + stars
     ctx.font = `${88 * u}px ${FONT}`;
     ctx.textAlign = 'center';
-    ctx.fillText('🐝', lx * 0.5, h * 0.3 + Math.sin(t * 2) * 12 * u);
+    ctx.fillText('🖍️', lx * 0.5, h * 0.3 + Math.sin(t * 2) * 12 * u);
     ctx.font = `${60 * u}px ${FONT}`;
     ctx.fillText('🌈', lx * 0.5, h * 0.46);
     flower(ctx, lx * 0.25, h * 0.9, 34 * u, '#FF8FB1');
@@ -313,7 +336,7 @@ export function drawKidScene(ctx: CanvasRenderingContext2D, w: number, h: number
     });
     ctx.font = `${70 * u}px ${FONT}`;
     ctx.textAlign = 'center';
-    ctx.fillText('🐝', w * 0.12, h * 0.1 + Math.sin(t * 2) * 10 * u);
+    ctx.fillText('🖍️', w * 0.12, h * 0.1 + Math.sin(t * 2) * 10 * u);
     ctx.fillText('🌈', w * 0.88, h * 0.11);
     sparkle(w * 0.2, paper.y - 30 * u, 24 * u, 0.5, '#FFD23F');
     sparkle(w * 0.82, paper.y - 20 * u, 20 * u, 1.9, '#FF8FB1');
@@ -321,29 +344,11 @@ export function drawKidScene(ctx: CanvasRenderingContext2D, w: number, h: number
     flower(ctx, w * 0.9, h * 0.96, 26 * u, '#FFB347');
   }
 
-  // ---- title banner -----------------------------------------------------------------------------
-  const bannerW = Math.min(w * 0.72, 900 * u);
-  const bannerH = (layout === 'portrait' ? 84 : 78) * u;
-  const bannerY = layout === 'portrait' ? h * 0.03 : h * 0.025;
-  ctx.save();
-  ctx.shadowColor = 'rgba(255, 70, 130, 0.35)';
-  ctx.shadowBlur = 16 * u;
-  ctx.fillStyle = '#FF5FA2';
-  ctx.beginPath();
-  ctx.roundRect((w - bannerW) / 2, bannerY, bannerW, bannerH, bannerH / 2);
-  ctx.fill();
-  ctx.restore();
-  ctx.fillStyle = 'rgba(255,255,255,0.28)';
-  ctx.beginPath();
-  ctx.roundRect((w - bannerW) / 2 + 10 * u, bannerY + 8 * u, bannerW - 20 * u, bannerH * 0.32, bannerH / 4);
-  ctx.fill();
-  roundedText(ctx, `${st.emoji} ${st.title}`, w / 2, bannerY + bannerH / 2 + 2 * u, bannerW * 0.9, 44 * u, '#FFFFFF');
-
-  // ---- progress stars + step text -------------------------------------------------------------------
+  // ---- progress stars (the only thing above the paper) ----------------------------------------
   const total = Math.max(1, st.progressTotal);
-  const starR = Math.min(20 * u, (bannerW * 0.8) / total / 2.4);
+  const starR = Math.min(26 * u, (w * 0.7) / total / 2.6);
   const starsW = total * starR * 2.6;
-  const starsY = bannerY + bannerH + 30 * u;
+  const starsY = h * (layout === 'landscape' ? 0.058 : layout === 'portrait' ? 0.045 : 0.052);
   for (let i = 0; i < total; i++) {
     const sx = (w - starsW) / 2 + starR * 1.3 + i * starR * 2.6;
     const done = i < st.progressDone;
@@ -355,32 +360,8 @@ export function drawKidScene(ctx: CanvasRenderingContext2D, w: number, h: number
     ctx.fill();
     ctx.stroke();
   }
-  if (layout !== 'landscape' && st.stepText) {
-    roundedText(ctx, st.stepText, w / 2, starsY + starR + 34 * u, w * 0.9, 34 * u, '#9B3A66');
-  } else if (st.stepText) {
-    roundedText(ctx, st.stepText, w / 2, paper.y - 18 * u, w * 0.6, 32 * u, '#9B3A66');
-  }
 
-  // ---- caption bar -------------------------------------------------------------------------------------
-  if (st.caption) {
-    const capW = Math.min(w * 0.9, layout === 'landscape' ? paper.w * 2.0 : w * 0.9);
-    const capH = (layout === 'portrait' ? 120 : 84) * u;
-    const capY = layout === 'landscape' ? h - capH - 22 * u : paper.y + paper.h + 26 * u;
-    ctx.save();
-    ctx.shadowColor = 'rgba(120, 60, 90, 0.25)';
-    ctx.shadowBlur = 18 * u;
-    ctx.fillStyle = 'rgba(255,255,255,0.96)';
-    ctx.beginPath();
-    ctx.roundRect((w - capW) / 2, capY, capW, capH, capH * 0.36);
-    ctx.fill();
-    ctx.restore();
-    ctx.strokeStyle = '#FFC4DC';
-    ctx.lineWidth = 4 * u;
-    ctx.beginPath();
-    ctx.roundRect((w - capW) / 2, capY, capW, capH, capH * 0.36);
-    ctx.stroke();
-    roundedText(ctx, st.caption, w / 2, capY + capH / 2 + 2 * u, capW * 0.92, 40 * u, '#5B2A45');
-  }
+  drawCaption(ctx, w, h, st.caption);
 
   return paper;
 }
@@ -402,5 +383,62 @@ export function drawPencilCursor(
   ctx.fill();
   // pencil leans up-right, tip at (x, y)
   pencil(ctx, x, y, size * 3.2, size * 0.38, color, -Math.PI / 4 - 0.25, false);
+  ctx.restore();
+}
+
+
+/**
+ * Dreamy finale: a soft glow plus a shower of twinkling pastel stars drifting around the artwork.
+ * Deterministic (no randomness per frame), so it is smooth and identical in preview and video.
+ */
+export function drawMagicStars(ctx: CanvasRenderingContext2D, w: number, h: number, t: number, k: number) {
+  if (k <= 0) return;
+  const u = Math.min(w, h) / 1080;
+  ctx.save();
+
+  // soft dreamy haze
+  const haze = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.1, w / 2, h / 2, Math.max(w, h) * 0.75);
+  haze.addColorStop(0, `rgba(255, 240, 250, ${0.0 * k})`);
+  haze.addColorStop(1, `rgba(255, 190, 230, ${0.42 * k})`);
+  ctx.fillStyle = haze;
+  ctx.fillRect(0, 0, w, h);
+
+  const colors = ['#FFE27A', '#FFB3D9', '#B8E4FF', '#E3C8FF', '#FFFFFF', '#FFD1A6'];
+  const count = 46;
+  for (let i = 0; i < count; i++) {
+    // pseudo-random but stable numbers per star
+    const r1 = (Math.sin(i * 127.1) * 43758.5453) % 1;
+    const r2 = (Math.sin(i * 311.7) * 12543.1357) % 1;
+    const r3 = (Math.sin(i * 74.7) * 9871.331) % 1;
+    const px0 = Math.abs(r1);
+    const speed = 0.015 + Math.abs(r3) * 0.03;
+    // stars slowly float down and wrap around
+    const py = ((Math.abs(r2) + t * speed) % 1) * (h + 120 * u) - 60 * u;
+    const px = px0 * w + Math.sin(t * 0.8 + i) * 24 * u;
+    const size = (10 + Math.abs(r3) * 26) * u;
+    const twinkle = 0.55 + 0.45 * Math.sin(t * 3 + i * 1.7);
+    ctx.globalAlpha = Math.min(1, k * twinkle);
+    ctx.shadowColor = colors[i % colors.length];
+    ctx.shadowBlur = size * 1.2;
+    ctx.fillStyle = colors[i % colors.length];
+    star(ctx, px, py, size, size * 0.42, t * 0.5 + i);
+    ctx.fill();
+  }
+
+  // a few big sparkles near the centre of the stage
+  for (let i = 0; i < 6; i++) {
+    const a = t * 0.6 + (i * Math.PI * 2) / 6;
+    const rx = w * 0.32;
+    const ry = h * 0.36;
+    const sx = w / 2 + Math.cos(a) * rx;
+    const sy = h / 2 + Math.sin(a) * ry;
+    const pulse = 0.6 + 0.4 * Math.sin(t * 4 + i);
+    ctx.globalAlpha = Math.min(1, k * pulse);
+    ctx.shadowColor = '#FFF3B0';
+    ctx.shadowBlur = 30 * u;
+    ctx.fillStyle = '#FFF6C2';
+    star(ctx, sx, sy, 34 * u * pulse, 12 * u * pulse, t);
+    ctx.fill();
+  }
   ctx.restore();
 }
