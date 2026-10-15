@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
-import { describeDrawing } from '../src/utils/describeDrawing';
+import { describeDrawing } from '../src/utils/describeDrawing.js';
 
 // Vercel serverless version of the /api/describe route from server.ts (needs GEMINI_API_KEY).
 export default async function handler(req: any, res: any) {

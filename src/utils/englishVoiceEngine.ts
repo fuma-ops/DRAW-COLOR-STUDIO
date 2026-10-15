@@ -32,6 +32,12 @@ export class EnglishVoiceEngine {
   private activePlaybackStopper: (() => void) | null = null;
   private currentSpeakId = 0;
 
+  /** What kind of voice the server really delivered (so a robotic voice is never a mystery) */
+  public voiceReport = { gemini: 0, fallback: 0, failed: 0, lastReason: '', lastModel: '' };
+  public resetVoiceReport() {
+    this.voiceReport = { gemini: 0, fallback: 0, failed: 0, lastReason: '', lastModel: '' };
+  }
+
   constructor() {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       this.synth = window.speechSynthesis;
@@ -150,10 +156,26 @@ export class EnglishVoiceEngine {
         });
 
         if (!resp.ok) {
-          throw new Error(`TTS HTTP ${resp.status}`);
+          let detail = '';
+          try {
+            const body = await resp.json();
+            detail = String(body.reason || body.error || '');
+          } catch {}
+          throw new Error(
+            resp.status === 404
+              ? 'TTS HTTP 404: the /api/tts function is not deployed'
+              : `TTS HTTP ${resp.status}${detail ? ': ' + detail : ''}`
+          );
         }
 
         const data = await resp.json();
+        if (data.source === 'fallback') {
+          this.voiceReport.fallback++;
+          this.voiceReport.lastReason = String(data.reason || 'Gemini voice unavailable');
+        } else if (data.audioBase64) {
+          this.voiceReport.gemini++;
+          this.voiceReport.lastModel = String(data.model || '');
+        }
         if (data.audioBase64) {
           const arrayBuf = base64ToArrayBuffer(data.audioBase64);
           const ctx = soundEngine.getAudioContext();
@@ -174,7 +196,9 @@ export class EnglishVoiceEngine {
             return decoded;
           }
         }
-      } catch (err) {
+      } catch (err: any) {
+        this.voiceReport.failed++;
+        this.voiceReport.lastReason = String(err?.message || err);
         console.warn('TTS fetch audio warning (will use audio fallback):', err);
       } finally {
         this.pendingFetches.delete(key);

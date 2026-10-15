@@ -143,6 +143,8 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
   const fxCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [isFinale, setIsFinale] = useState<boolean>(false);
   const [narratorVoice, setNarratorVoice] = useState<string>('Puck');
+  // Which voice the server really delivered (green = expressive Gemini voice, amber = plain/robotic fallback)
+  const [voiceStatus, setVoiceStatus] = useState<{ ok: boolean; text: string } | null>(null);
   // What the drawing is ("cup", "bee"...), known only for the presets or when the optional AI naming succeeded
   const [objectNames, setObjectNames] = useState<{ en: string; fr: string }>({ en: 'bee', fr: 'abeille' });
   const objectName = lang === 'fr' ? objectNames.fr : objectNames.en;
@@ -709,17 +711,46 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
    * Downloads every narrator line before the tutorial/video starts, so there are no silent gaps
    * and the (recorded) voice is already in memory.
    */
+  /** One click: runs a real voice call on the server and shows exactly why it works or fails */
+  const testVoiceServer = async () => {
+    setVoiceStatus({ ok: true, text: 'Testing the voice server…' });
+    try {
+      const r = await fetch('/api/tts?test=1');
+      if (!r.ok) {
+        setVoiceStatus({ ok: false, text: r.status === 404 ? '/api/tts is not deployed (404). Check that the api/ folder is in the repo and redeploy.' : `Voice server error HTTP ${r.status}` });
+        return;
+      }
+      const d = await r.json();
+      if (d.ok) setVoiceStatus({ ok: true, text: `Gemini voice works ✓ (${d.model}, ${d.ms} ms)` });
+      else if (d.problem) setVoiceStatus({ ok: false, text: d.problem });
+      else if (d.hasKey === false) setVoiceStatus({ ok: false, text: 'GEMINI_API_KEY is not set on the server.' });
+      else setVoiceStatus({ ok: false, text: ('Gemini refused: ' + (d.errors || []).map((e: any) => `${e.model}: ${e.error}`).join(' | ')).slice(0, 300) });
+    } catch (err: any) {
+      setVoiceStatus({ ok: false, text: 'Could not reach /api/tts: ' + (err?.message || err) });
+    }
+  };
+
   const prepareVoice = async () => {
     if (!enableVoice) return;
     setIsPreparingVoice(true);
     try {
       const script = buildTutorialScript(drawingSteps, coloringSteps, lang, objectName);
+      englishVoiceEngine.resetVoiceReport();
       await englishVoiceEngine.prefetchLines(
         script.all,
         narratorVoice,
         lang === 'fr' ? 'fr-FR' : 'en-US',
         (done, total) => setVoiceProgress({ done, total })
       );
+      const rep = englishVoiceEngine.voiceReport;
+      if (rep.gemini > 0 && rep.fallback === 0 && rep.failed === 0) {
+        setVoiceStatus({ ok: true, text: `Gemini voice ✓ (${rep.gemini} lines${rep.lastModel ? ', ' + rep.lastModel : ''})` });
+      } else {
+        setVoiceStatus({
+          ok: false,
+          text: `Plain voice used (${rep.gemini} Gemini · ${rep.fallback} plain · ${rep.failed} errors). ${rep.lastReason}`.slice(0, 260),
+        });
+      }
     } catch (err) {
       console.warn('Voice preparation warning', err);
     } finally {
@@ -1401,6 +1432,27 @@ export const KidStepByStepGenerator: React.FC<KidStepByStepGeneratorProps> = ({
                 ))}
               </select>
             </label>
+
+            <div className="flex items-center gap-2 max-w-full">
+              <button
+                onClick={testVoiceServer}
+                disabled={isPlaying}
+                className="text-xs font-bold px-2.5 py-1 rounded-xl bg-white border border-rose-200 text-rose-600 hover:bg-rose-50"
+                title="Runs one real voice call and tells you if the expressive Gemini voice works"
+              >
+                🔊 Test voice
+              </button>
+              {voiceStatus && (
+                <span
+                  className={`text-[11px] font-bold px-2 py-1 rounded-lg max-w-[420px] leading-tight ${
+                    voiceStatus.ok ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'
+                  }`}
+                >
+                  {voiceStatus.ok ? '✅ ' : '⚠️ '}
+                  {voiceStatus.text}
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </div>
