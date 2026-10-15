@@ -460,16 +460,38 @@ function traceRegionBoundary(
   return d;
 }
 
+interface AnalyzedRegion {
+  id: number;
+  pixels: number[];
+  area: number;
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  centerX: number;
+  centerY: number;
+  seedX: number;
+  seedY: number;
+  hasColor: boolean;
+  colorHex: string;
+  colorNameEn: string;
+  instructionEn: string;
+  /** Smallest larger region whose bounding box contains this one (eye inside head...) */
+  parentId: number | null;
+  /** Big shape of the character (head, body, wing...) as opposed to a small detail */
+  isMajor: boolean;
+}
+
 /**
  * Extracts enclosed regions from the line art grid using connected-component flood fill,
  * traces their actual boundary polygons, and samples matching dominant colors from the original colored image.
  */
-function extractEnclosedRegionsAndColors(
+function analyzeRegions(
   outlineGrid: Uint8Array,
   colorData: Uint8ClampedArray,
   width: number,
   height: number
-): KidColoringStep[] {
+): { regions: AnalyzedRegion[]; regionGrid: Int32Array } {
   // regionGrid: -1 = outline barrier, 0 = unvisited, -2 = outer canvas background, >0 = region ID
   const regionGrid = new Int32Array(width * height);
 
@@ -521,20 +543,7 @@ function extractEnclosedRegionsAndColors(
 
   // 2. Scan for enclosed interior regions
   let nextRegionId = 1;
-  const regions: {
-    id: number;
-    pixels: number[];
-    minX: number;
-    minY: number;
-    maxX: number;
-    maxY: number;
-    seedX: number;
-    seedY: number;
-    colorHex: string;
-    colorNameEn: string;
-    instructionEn: string;
-    fillPath: string;
-  }[] = [];
+  const regions: AnalyzedRegion[] = [];
 
   for (let y = 5; y < height - 5; y++) {
     for (let x = 5; x < width - 5; x++) {
@@ -614,6 +623,7 @@ function extractEnclosedRegionsAndColors(
         sampledCount++;
       }
 
+      const hasColor = sampledCount > 0;
       let hex = '#FDE047';
       let nameEn = 'Honey Yellow';
       let promptEn = 'Sunny yellow! Paint paint!';
@@ -652,40 +662,102 @@ function extractEnclosedRegionsAndColors(
         }
       }
 
-      // Trace exact boundary polygon of this region
-      const fillPath = traceRegionBoundary(regionPixels, width, height, minX, minY, maxX, maxY);
-
       regions.push({
         id: currentRegionId,
         pixels: regionPixels,
+        area: regionPixels.length,
         minX,
         minY,
         maxX,
         maxY,
+        centerX: Math.round((minX + maxX) / 2),
+        centerY: Math.round((minY + maxY) / 2),
         seedX,
         seedY,
+        hasColor,
         colorHex: hex,
         colorNameEn: nameEn,
         instructionEn: promptEn,
-        fillPath,
+        parentId: null,
+        isMajor: false,
       });
     }
   }
 
-  // Sort regions by area descending
-  regions.sort((a, b) => b.pixels.length - a.pixels.length);
+  return { regions, regionGrid };
+}
 
-  return regions.slice(0, 6).map((r, idx) => {
+/**
+ * Marks which regions are MAJOR shapes (head, body, wings...) and which are small details
+ * (eyes, cheeks...), and links every region to the larger region that contains it.
+ * Returns the major regions in kid tutorial order: big shapes first, parents before children,
+ * upper-left (head) before lower-right (body, tail).
+ */
+function classifyAndOrderMajors(regions: AnalyzedRegion[]): AnalyzedRegion[] {
+  if (regions.length === 0) return [];
+  const maxArea = Math.max(...regions.map(r => r.area));
+  const margin = 3;
+
+  for (const r of regions) {
+    let parent: AnalyzedRegion | null = null;
+    for (const p of regions) {
+      if (p === r || p.area <= r.area) continue;
+      if (
+        r.minX >= p.minX - margin && r.maxX <= p.maxX + margin &&
+        r.minY >= p.minY - margin && r.maxY <= p.maxY + margin
+      ) {
+        if (!parent || p.area < parent.area) parent = p;
+      }
+    }
+    r.parentId = parent ? parent.id : null;
+    r.isMajor = r.area >= Math.max(1200, maxArea * 0.1);
+  }
+
+  const key = (r: AnalyzedRegion) => r.centerY * 0.7 + r.centerX * 0.3;
+  const majors = regions.filter(r => r.isMajor).sort((a, b) => key(a) - key(b));
+
+  // Parent shapes must always be drawn before the shapes they contain
+  const ordered: AnalyzedRegion[] = [];
+  const emitted = new Set<number>();
+  const byId = new Map(regions.map(r => [r.id, r]));
+  const emit = (r: AnalyzedRegion) => {
+    if (emitted.has(r.id)) return;
+    const parent = r.parentId !== null ? byId.get(r.parentId) : undefined;
+    if (parent && parent.isMajor) emit(parent);
+    emitted.add(r.id);
+    ordered.push(r);
+  };
+  majors.forEach(emit);
+  return ordered;
+}
+
+/**
+ * Coloring steps follow the same tutorial order as the drawing steps:
+ * big shapes first, then the small colored details.
+ */
+function buildColoringSteps(
+  regions: AnalyzedRegion[],
+  orderedMajors: AnalyzedRegion[],
+  width: number,
+  height: number
+): KidColoringStep[] {
+  const minors = regions
+    .filter(r => !r.isMajor && r.hasColor)
+    .sort((a, b) => b.area - a.area);
+  const chosen = [...orderedMajors, ...minors].slice(0, 8);
+
+  return chosen.map((r, idx) => {
     const pad = 12;
     const fx1 = Math.max(0, r.minX - pad);
     const fy1 = Math.max(0, r.minY - pad);
     const fx2 = Math.min(width, r.maxX + pad);
     const fy2 = Math.min(height, r.maxY + pad);
+    const fillPath = traceRegionBoundary(r.pixels, width, height, r.minX, r.minY, r.maxX, r.maxY);
 
     return {
       id: `color_region_${idx + 1}`,
       stepNumber: idx + 1,
-      totalSteps: Math.min(6, regions.length),
+      totalSteps: chosen.length,
       partName: r.colorNameEn,
       partNameEn: r.colorNameEn,
       emoji: idx === 0 ? '🍯' : idx === 1 ? '🍫' : idx === 2 ? '🪽' : idx === 3 ? '🌸' : '✨',
@@ -696,12 +768,315 @@ function extractEnclosedRegionsAndColors(
       instructionEn: r.instructionEn,
       felicitationFr: 'Superbe couleur !',
       felicitationEn: r.instructionEn,
-      fillPath: r.fillPath,
+      fillPath,
       regionSeed: { x: r.seedX, y: r.seedY },
       glitterContourPath: `M ${fx1} ${fy1} L ${fx2} ${fy1} L ${fx2} ${fy2} L ${fx1} ${fy2} Z`,
       glitterCenter: { x: Math.round((fx1 + fx2) / 2), y: Math.round((fy1 + fy2) / 2) },
     };
   });
+}
+
+type Pt = { x: number; y: number };
+type TracedStroke = { d: string; points: Pt[]; bounds: ReturnType<typeof computeBounds> };
+
+const MAX_DRAWING_STEPS = 8;
+const MAX_MAJOR_STEPS = 5;
+/** Skeleton pieces up to this many pixels (and visually small) are "details": eyes, mouth, cheeks, feet... */
+const DETAIL_MAX_PIXELS = 300;
+
+/**
+ * Builds the drawing steps so the child draws ONE WHOLE SHAPE AT A TIME:
+ *   1. big shapes in tutorial order (head -> body -> wings...), each one fully finished,
+ *   2. then small details grouped by kind (both eyes together, then mouth, then feet...).
+ *
+ * Every skeleton pixel is owned by exactly one step, so nothing is drawn twice and
+ * nothing is skipped (the old logic grouped strokes by distance and dropped everything after 6 groups).
+ */
+function buildTutorialDrawingSteps(
+  skeleton: Uint8Array,
+  regionGrid: Int32Array,
+  regions: AnalyzedRegion[],
+  orderedMajors: AnalyzedRegion[],
+  width: number,
+  height: number
+): KidDrawingStep[] {
+  const byId = new Map(regions.map(r => [r.id, r]));
+
+  // ---- Step groups: majors first ------------------------------------------------
+  const majorGroupOf = new Map<number, number>(); // regionId -> group index
+  orderedMajors.forEach((r, i) => majorGroupOf.set(r.id, Math.min(i, MAX_MAJOR_STEPS - 1)));
+  const majorGroupCount = Math.min(orderedMajors.length, MAX_MAJOR_STEPS);
+
+  /** Group index of the major shape that owns (or contains) a region, or -1 */
+  const groupOfRegion = (regionId: number): number => {
+    let cur: AnalyzedRegion | undefined = byId.get(regionId);
+    let guard = 0;
+    while (cur && guard++ < 20) {
+      const g = majorGroupOf.get(cur.id);
+      if (g !== undefined) return g;
+      cur = cur.parentId !== null ? byId.get(cur.parentId) : undefined;
+    }
+    return -1;
+  };
+
+  // ---- Skeleton connected components (8-neighbour) -------------------------------
+  const cc = new Int32Array(skeleton.length).fill(-1);
+  const comps: { pixels: number[]; minX: number; minY: number; maxX: number; maxY: number }[] = [];
+  for (let i = 0; i < skeleton.length; i++) {
+    if (skeleton[i] !== 1 || cc[i] !== -1) continue;
+    const id = comps.length;
+    const comp = { pixels: [] as number[], minX: width, minY: height, maxX: 0, maxY: 0 };
+    const stack = [i];
+    cc[i] = id;
+    while (stack.length) {
+      const cur = stack.pop()!;
+      comp.pixels.push(cur);
+      const x = cur % width;
+      const y = (cur - x) / width;
+      if (x < comp.minX) comp.minX = x;
+      if (x > comp.maxX) comp.maxX = x;
+      if (y < comp.minY) comp.minY = y;
+      if (y > comp.maxY) comp.maxY = y;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const n = ny * width + nx;
+          if (skeleton[n] === 1 && cc[n] === -1) {
+            cc[n] = id;
+            stack.push(n);
+          }
+        }
+      }
+    }
+    comps.push(comp);
+  }
+
+  /** Nearest enclosed region around a point (ignores ink and outer paper) */
+  const nearestRegionId = (px: number, py: number, maxR: number): number => {
+    for (let r = 1; r <= maxR; r += 2) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const nx = px + dx;
+          const ny = py + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          const v = regionGrid[ny * width + nx];
+          if (v > 0) return v;
+        }
+      }
+    }
+    return -1;
+  };
+
+  // ---- Small detached pieces become detail items --------------------------------
+  interface DetailItem { comp: number; size: number; cx: number; cy: number; parent: number }
+  const details: DetailItem[] = [];
+  const bigComps: number[] = [];
+  comps.forEach((c, id) => {
+    const w = c.maxX - c.minX;
+    const h = c.maxY - c.minY;
+    const small = c.pixels.length <= DETAIL_MAX_PIXELS && Math.max(w, h) <= width * 0.25;
+    if (!small) {
+      bigComps.push(id);
+      return;
+    }
+    const cx = Math.round((c.minX + c.maxX) / 2);
+    const cy = Math.round((c.minY + c.maxY) / 2);
+    const rid = nearestRegionId(cx, cy, 24);
+    details.push({ comp: id, size: c.pixels.length, cx, cy, parent: rid === -1 ? -1 : groupOfRegion(rid) });
+  });
+
+  // Cluster details: same parent shape + similar size => one step (both eyes together)
+  interface DetailCluster { items: DetailItem[]; parent: number; cx: number; cy: number }
+  const clusters: DetailCluster[] = [];
+  const parents = Array.from(new Set(details.map(d => d.parent)));
+  for (const parent of parents) {
+    const items = details.filter(d => d.parent === parent).sort((a, b) => b.size - a.size);
+    let current: DetailItem[] = [];
+    const flush = () => {
+      if (!current.length) return;
+      clusters.push({
+        items: current,
+        parent,
+        cx: Math.round(current.reduce((s, i) => s + i.cx, 0) / current.length),
+        cy: Math.round(current.reduce((s, i) => s + i.cy, 0) / current.length),
+      });
+      current = [];
+    };
+    for (const it of items) {
+      if (current.length && current[0].size / Math.max(1, it.size) > 2.5) flush();
+      current.push(it);
+    }
+    flush();
+  }
+  // Details inside a shape follow that shape's order; loose pieces (feet, antennae) come last
+  clusters.sort((a, b) => {
+    const pa = a.parent === -1 ? 99 : a.parent;
+    const pb = b.parent === -1 ? 99 : b.parent;
+    return pa !== pb ? pa - pb : a.cy - b.cy;
+  });
+  // Never exceed the step budget: fold the smallest trailing clusters into the last allowed one
+  const maxClusters = Math.max(0, MAX_DRAWING_STEPS - majorGroupCount);
+  while (clusters.length > maxClusters && clusters.length > 1) {
+    const extra = clusters.pop()!;
+    clusters[clusters.length - 1].items.push(...extra.items);
+  }
+
+  const totalGroups = majorGroupCount + clusters.length;
+  if (totalGroups === 0) return [];
+
+  // ---- Assign every skeleton pixel to exactly one group --------------------------
+  const groupOfPixel = new Int16Array(skeleton.length).fill(-1);
+  clusters.forEach((cl, ci) => {
+    for (const it of cl.items) {
+      for (const p of comps[it.comp].pixels) groupOfPixel[p] = majorGroupCount + ci;
+    }
+  });
+
+  const R = 6;
+  for (const id of bigComps) {
+    for (const p of comps[id].pixels) {
+      const x = p % width;
+      const y = (p - x) / width;
+      // The earliest shape touching this line owns it => shared edges are drawn once, with the first shape
+      let best = Infinity;
+      for (let dy = -R; dy <= R; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height) continue;
+        for (let dx = -R; dx <= R; dx++) {
+          const nx = x + dx;
+          if (nx < 0 || nx >= width) continue;
+          const v = regionGrid[ny * width + nx];
+          if (v > 0) {
+            const g = groupOfRegion(v);
+            if (g !== -1 && g < best) best = g;
+          }
+        }
+      }
+      if (best === Infinity) {
+        const rid = nearestRegionId(x, y, 30);
+        const g = rid === -1 ? -1 : groupOfRegion(rid);
+        best = g === -1 ? Math.max(0, majorGroupCount - 1) : g;
+      }
+      groupOfPixel[p] = Math.min(best, totalGroups - 1);
+    }
+  }
+
+  // ---- Trace each group's pixels into pen strokes --------------------------------
+  const tracedGroups: TracedStroke[][] = [];
+  for (let g = 0; g < totalGroups; g++) {
+    const mask = new Uint8Array(skeleton.length);
+    let count = 0;
+    for (let i = 0; i < mask.length; i++) {
+      if (groupOfPixel[i] === g) {
+        mask[i] = 1;
+        count++;
+      }
+    }
+    if (count === 0) { tracedGroups.push([]); continue; }
+
+    const strokes = traceTopologicalPaths(mask, width, height).map(st => {
+      const simplified = simplifyPathRDP(st, 1.6);
+      let dense = interpolateDensePoints(simplified, 5);
+      const first = dense[0];
+      const last = dense[dense.length - 1];
+      // Close loops so the pen finishes the circle exactly where it started
+      if (dense.length >= 6 && Math.hypot(last.x - first.x, last.y - first.y) <= 8) {
+        dense = [...dense, { x: first.x, y: first.y }];
+      }
+      return { d: pointsToSvgPath(simplified), points: dense, bounds: computeBounds(dense) };
+    });
+    // Drop tiny leftover spurs so the pen never lifts for a 1-2px fragment of a shape that is already drawn
+    const longest = Math.max(...strokes.map(st => st.points.length));
+    const clean = longest >= 30 ? strokes.filter(st => st.points.length >= 6) : strokes;
+    tracedGroups.push(orderStrokesForPen(clean));
+  }
+
+  // ---- Describe the steps ----------------------------------------------------------
+  const MAJOR_LABELS = [
+    { name: 'Round Head', voice: 'Round round head! Big circle!', emoji: '🟡' },
+    { name: 'Chubby Body', voice: 'Now the chubby body!', emoji: '🐝' },
+    { name: 'Soft Wings & Big Parts', voice: 'Big soft shapes! Flap flap!', emoji: '🪽' },
+    { name: 'Next Big Shape', voice: 'Another big shape! You can do it!', emoji: '🌟' },
+    { name: 'More Big Shapes', voice: 'Almost there! One more big shape!', emoji: '🌟' },
+  ];
+  const labelFor = (g: number): { name: string; voice: string; emoji: string } => {
+    if (g < majorGroupCount) return MAJOR_LABELS[Math.min(g, MAJOR_LABELS.length - 1)];
+    const cl = clusters[g - majorGroupCount];
+    const insideShape = cl.parent !== -1;
+    const firstInside = clusters.findIndex(c => c.parent !== -1) === g - majorGroupCount;
+    if (insideShape && firstInside && cl.items.length >= 2) {
+      return { name: 'Cute Eyes', voice: 'Two cute eyes! Dot dot!', emoji: '👀' };
+    }
+    if (insideShape) {
+      return { name: 'Smile & Face Details', voice: 'Cute eyes and happy smile!', emoji: '😊' };
+    }
+    if (cl.items.length >= 2) {
+      return { name: 'Tiny Feet & Details', voice: 'Tiny details! Tap tap tap!', emoji: '✨' };
+    }
+    return { name: 'Final Detail', voice: 'One last little detail!', emoji: '✨' };
+  };
+
+  const nonEmpty = tracedGroups
+    .map((strokes, g) => ({ strokes, g }))
+    .filter(x => x.strokes.length > 0);
+
+  return nonEmpty.map(({ strokes, g }, idx) => {
+    const allPts = strokes.flatMap(s => s.points);
+    const b = computeBounds(allPts);
+    const lbl = labelFor(g);
+    const pad = 16;
+    const gx1 = Math.max(10, b.minX - pad);
+    const gy1 = Math.max(10, b.minY - pad);
+    const gx2 = Math.min(width - 10, b.maxX + pad);
+    const gy2 = Math.min(height - 10, b.maxY + pad);
+
+    return {
+      id: `step_${idx + 1}`,
+      stepNumber: idx + 1,
+      totalSteps: nonEmpty.length,
+      partName: lbl.name,
+      partNameEn: lbl.name,
+      emoji: lbl.emoji,
+      instructionFr: lbl.voice,
+      instructionEn: lbl.voice,
+      felicitationFr: 'Superbe !',
+      felicitationEn: lbl.voice,
+      praiseTitleFr: `🌟 ${lbl.name.toUpperCase()} !`,
+      praiseTitleEn: `🌟 ${lbl.name.toUpperCase()}!`,
+      badgeColor: '#F59E0B',
+      tool: 'pen' as const,
+      strokeColor: '#18181B',
+      strokeWidth: 5,
+      glitterContourPath: `M ${gx1} ${gy1} L ${gx2} ${gy1} L ${gx2} ${gy2} L ${gx1} ${gy2} Z`,
+      glitterCenter: { x: b.centerX, y: b.centerY },
+      paths: strokes.map(s => ({ d: s.d, points: s.points })),
+    };
+  });
+}
+
+/** Longest stroke first (the main outline), then always the nearest next stroke so the pen barely travels. */
+function orderStrokesForPen(strokes: TracedStroke[]): TracedStroke[] {
+  if (strokes.length <= 1) return strokes;
+  const remaining = [...strokes].sort((a, b) => b.points.length - a.points.length);
+  const out: TracedStroke[] = [remaining.shift()!];
+  while (remaining.length) {
+    const tail = out[out.length - 1].points;
+    const end = tail[tail.length - 1];
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    remaining.forEach((s, i) => {
+      const d = Math.min(
+        Math.hypot(s.points[0].x - end.x, s.points[0].y - end.y),
+        Math.hypot(s.points[s.points.length - 1].x - end.x, s.points[s.points.length - 1].y - end.y)
+      );
+      if (d < bestDist) { bestDist = d; bestIdx = i; }
+    });
+    out.push(remaining.splice(bestIdx, 1)[0]);
+  }
+  return out;
 }
 
 /**
@@ -862,75 +1237,14 @@ export async function processColoredCharacterImage(
 </svg>
 `;
 
-        // 8. Group strokes into logical KidDrawingSteps
-        const strokeGroups: (typeof processedStrokes)[] = [];
-        for (const st of processedStrokes) {
-          let placed = false;
-          for (const grp of strokeGroups) {
-            const grpBounds = computeBounds(grp.flatMap(s => s.points));
-            const dist = Math.hypot(st.bounds.centerX - grpBounds.centerX, st.bounds.centerY - grpBounds.centerY);
-            if (dist < 120) {
-              grp.push(st);
-              placed = true;
-              break;
-            }
-          }
-          if (!placed) {
-            strokeGroups.push([st]);
-          }
-        }
+        // 8. Find the character's closed shapes (head, body, eyes...) and order them like a kid tutorial
+        const { regions, regionGrid } = analyzeRegions(outlineGrid, data, size, size);
+        const orderedMajors = classifyAndOrderMajors(regions);
 
-        // Sort groups in natural kid tutorial order (upper-left head/face -> torso -> details)
-        strokeGroups.sort((a, b) => {
-          const aB = computeBounds(a.flatMap(s => s.points));
-          const bB = computeBounds(b.flatMap(s => s.points));
-          return (aB.centerY * 0.7 + aB.centerX * 0.3) - (bB.centerY * 0.7 + bB.centerX * 0.3);
-        });
-
-        const labels = [
-          { name: 'Head & Face', voice: 'Round round head!', emoji: '🟡' },
-          { name: 'Cute Eyes & Smile', voice: 'Cute eyes and happy smile!', emoji: '😊' },
-          { name: 'Chubby Body', voice: 'Chubby body and stinger!', emoji: '🐝' },
-          { name: 'Sweet Stripes', voice: 'Stripes! One, two, three!', emoji: '🍯' },
-          { name: 'Soft Wings', voice: 'Two soft wings! Flap flap!', emoji: '🪽' },
-          { name: 'Tiny Feet', voice: 'Three tiny feet! Tap tap!', emoji: '✨' },
-        ];
-
-        const drawingSteps: KidDrawingStep[] = strokeGroups.slice(0, 6).map((grp, idx) => {
-          const allPts = grp.flatMap(s => s.points);
-          const b = computeBounds(allPts);
-          const lbl = labels[idx % labels.length];
-          const pad = 16;
-          const gx1 = Math.max(10, b.minX - pad);
-          const gy1 = Math.max(10, b.minY - pad);
-          const gx2 = Math.min(790, b.maxX + pad);
-          const gy2 = Math.min(790, b.maxY + pad);
-
-          return {
-            id: `step_${idx + 1}`,
-            stepNumber: idx + 1,
-            totalSteps: Math.min(6, strokeGroups.length),
-            partName: lbl.name,
-            partNameEn: lbl.name,
-            emoji: lbl.emoji,
-            instructionFr: lbl.voice,
-            instructionEn: lbl.voice,
-            felicitationFr: 'Superbe !',
-            felicitationEn: lbl.voice,
-            praiseTitleFr: `🌟 ${lbl.name.toUpperCase()} !`,
-            praiseTitleEn: `🌟 ${lbl.name.toUpperCase()}!`,
-            badgeColor: '#F59E0B',
-            tool: 'pen',
-            strokeColor: '#18181B',
-            strokeWidth: 5,
-            glitterContourPath: `M ${gx1} ${gy1} L ${gx2} ${gy1} L ${gx2} ${gy2} L ${gx1} ${gy2} Z`,
-            glitterCenter: { x: b.centerX, y: b.centerY },
-            paths: grp.map(s => ({ d: s.d, points: s.points })),
-          };
-        });
-
-        // 9. Extract enclosed coloring regions with exact boundaries and matching colors
-        const coloringSteps = extractEnclosedRegionsAndColors(outlineGrid, data, size, size);
+        // 9. Drawing steps: one WHOLE shape at a time (head -> body -> big parts -> eyes -> details),
+        //    then coloring steps in the very same order
+        const drawingSteps = buildTutorialDrawingSteps(skeleton, regionGrid, regions, orderedMajors, size, size);
+        const coloringSteps = buildColoringSteps(regions, orderedMajors, size, size);
 
         // 10. Validation Report
         const warnings: string[] = [];
