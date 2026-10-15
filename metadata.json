@@ -1,0 +1,7 @@
+{
+  "name": "Kawaii Color",
+  "description": "Cozy, feminine, and relaxing digital coloring app with realistic crayon, watercolor, and pencil textures and smart region protection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
