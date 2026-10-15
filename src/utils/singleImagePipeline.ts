@@ -377,89 +377,6 @@ function computeBounds(points: { x: number; y: number }[]) {
   };
 }
 
-/**
- * Traces the exact perimeter boundary of an enclosed region using Moore-Neighbor contour tracing,
- * producing a clean closed SVG polygon path that strictly encloses the region without leaking.
- */
-function traceRegionBoundary(
-  regionPixels: number[],
-  width: number,
-  height: number,
-  minX: number,
-  minY: number,
-  maxX: number,
-  maxY: number
-): string {
-  const mask = new Uint8Array(width * height);
-  for (const idx of regionPixels) {
-    mask[idx] = 1;
-  }
-
-  // Find first pixel (top-leftmost)
-  let startX = -1;
-  let startY = -1;
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      if (mask[y * width + x] === 1) {
-        startX = x;
-        startY = y;
-        break;
-      }
-    }
-    if (startX !== -1) break;
-  }
-
-  if (startX === -1) return '';
-
-  // 8-neighbor directions clockwise:
-  // 0: N, 1: NE, 2: E, 3: SE, 4: S, 5: SW, 6: W, 7: NW
-  const dx = [0, 1, 1, 1, 0, -1, -1, -1];
-  const dy = [-1, -1, 0, 1, 1, 1, 0, -1];
-
-  const boundaryPts: { x: number; y: number }[] = [{ x: startX, y: startY }];
-  let curX = startX;
-  let curY = startY;
-  let dir = 7;
-
-  let maxSteps = 3000;
-  while (maxSteps-- > 0) {
-    let found = false;
-    const startSearch = (dir + 5) % 8;
-    for (let i = 0; i < 8; i++) {
-      const checkDir = (startSearch + i) % 8;
-      const nx = curX + dx[checkDir];
-      const ny = curY + dy[checkDir];
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-        if (mask[ny * width + nx] === 1) {
-          curX = nx;
-          curY = ny;
-          dir = checkDir;
-          boundaryPts.push({ x: curX, y: curY });
-          found = true;
-          break;
-        }
-      }
-    }
-
-    if (!found || (curX === startX && curY === startY && boundaryPts.length > 2)) {
-      break;
-    }
-  }
-
-  if (boundaryPts.length < 3) {
-    return `M ${minX} ${minY} L ${maxX} ${minY} L ${maxX} ${maxY} L ${minX} ${maxY} Z`;
-  }
-
-  // Simplify boundary with RDP
-  const simplified = simplifyPathRDP(boundaryPts, 2.0);
-  let d = `M ${simplified[0].x} ${simplified[0].y}`;
-  for (let i = 1; i < simplified.length; i++) {
-    d += ` L ${simplified[i].x} ${simplified[i].y}`;
-  }
-  d += ' Z';
-  return d;
-}
-
 type Pt = { x: number; y: number };
 type TracedStroke = { d: string; points: Pt[]; bounds: ReturnType<typeof computeBounds> };
 
@@ -615,6 +532,7 @@ interface DrawPart {
 
 interface DetailItem {
   kind: 'blob' | 'line';
+  pixels: number[];
   strokes: TracedStroke[];
   size: number;
   cx: number;
@@ -744,34 +662,49 @@ function findDrawingParts(data: Uint8ClampedArray, size: number) {
   return { parts, grid, black, growSteps, medianRun };
 }
 
-/** Closed pen loop around a whole part, placed on the middle of the black outline. */
-function partToStroke(part: DrawPart, grid: Int32Array, size: number, growSteps: number): TracedStroke | null {
+/** Grows a set of pixels outward by `steps` pixels, only through pixels accepted by `canGrow`. */
+function growMask(
+  startPixels: number[],
+  size: number,
+  steps: number,
+  canGrow: (idx: number) => boolean
+): Uint8Array {
   const mask = new Uint8Array(size * size);
-  let frontier: number[] = [];
-  for (const p of part.pixels) {
-    mask[p] = 1;
-    const x = p % size;
-    const y = (p - x) / size;
-    if ((x > 0 && grid[p - 1] === -1) || (x < size - 1 && grid[p + 1] === -1) ||
-        (y > 0 && grid[p - size] === -1) || (y < size - 1 && grid[p + size] === -1)) {
-      frontier.push(p);
-    }
-  }
-  for (let s = 0; s < growSteps; s++) {
+  for (const p of startPixels) mask[p] = 1;
+  let frontier = startPixels;
+  for (let s = 0; s < steps; s++) {
     const next: number[] = [];
     for (const p of frontier) {
       const x = p % size;
       const y = (p - x) / size;
       const nbs = [x > 0 ? p - 1 : -1, x < size - 1 ? p + 1 : -1, y > 0 ? p - size : -1, y < size - 1 ? p + size : -1];
       for (const n of nbs) {
-        if (n !== -1 && grid[n] === -1 && mask[n] === 0) { mask[n] = 1; next.push(n); }
+        if (n !== -1 && mask[n] === 0 && canGrow(n)) { mask[n] = 1; next.push(n); }
       }
     }
     frontier = next;
   }
+  return mask;
+}
+
+/** The part, grown to the middle of the black outline (so paint reaches the line, with no white gap) */
+function partMask(part: DrawPart, grid: Int32Array, size: number, growSteps: number): Uint8Array {
+  return growMask(part.pixels, size, growSteps, n => grid[n] === -1);
+}
+
+/** Closed pen loop around a whole part, placed on the middle of the black outline. */
+function partToStroke(part: DrawPart, grid: Int32Array, size: number, growSteps: number): TracedStroke | null {
+  const mask = partMask(part, grid, size, growSteps);
   const pad = growSteps + 2;
   const contour = traceOuterContour(mask, size, size, part.minX - pad, part.minY - pad, part.maxX + pad, part.maxY + pad);
   return contourToStroke(contour);
+}
+
+/** Closed SVG polygon around a pixel mask (used to clip the paint so it never bleeds outside the area). */
+function maskToPath(mask: Uint8Array, size: number, minX: number, minY: number, maxX: number, maxY: number): string {
+  const stroke = contourToStroke(traceOuterContour(mask, size, size, minX - 1, minY - 1, maxX + 1, maxY + 1));
+  if (stroke) return stroke.d;
+  return `M ${minX} ${minY} L ${maxX} ${minY} L ${maxX} ${maxY} L ${minX} ${maxY} Z`;
 }
 
 /** Eyes (dark blobs), eyebrows and smile (thin lines) that float inside or next to the shapes. */
@@ -823,7 +756,7 @@ function findDetails(
       const mask = new Uint8Array(size * size);
       for (const p of c.pixels) mask[p] = 1;
       const stroke = contourToStroke(traceOuterContour(mask, size, size, c.minX - 2, c.minY - 2, c.maxX + 2, c.maxY + 2));
-      if (stroke) items.push({ kind: 'blob', strokes: [stroke], size: c.pixels.length, cx, cy, parent: nearestPart(cx, cy, 60) });
+      if (stroke) items.push({ kind: 'blob', pixels: c.pixels, strokes: [stroke], size: c.pixels.length, cx, cy, parent: nearestPart(cx, cy, 60) });
     } else {
       for (const p of c.pixels) thinMask[p] = 1;
       thinComps.push(id);
@@ -847,7 +780,7 @@ function findDetails(
       const c = comps[compId];
       const cx = Math.round((c.minX + c.maxX) / 2);
       const cy = Math.round((c.minY + c.maxY) / 2);
-      items.push({ kind: 'line', strokes: list, size: c.pixels.length, cx, cy, parent: nearestPart(cx, cy, 60) });
+      items.push({ kind: 'line', pixels: c.pixels, strokes: list, size: c.pixels.length, cx, cy, parent: nearestPart(cx, cy, 60) });
     });
   }
   return items;
@@ -862,10 +795,12 @@ function buildDrawingSteps(data: Uint8ClampedArray, size: number): {
   parts: DrawPart[];
   partGrid: Int32Array;
   partRank: Map<number, number>;
+  growSteps: number;
+  blobFills: { pixels: number[]; rank: number }[];
 } {
   const { parts, grid, black, growSteps, medianRun } = findDrawingParts(data, size);
   const partRank = new Map<number, number>();
-  if (parts.length === 0) return { steps: [], parts, partGrid: grid, partRank };
+  if (parts.length === 0) return { steps: [], parts, partGrid: grid, partRank, growSteps, blobFills: [] };
 
   const details = findDetails(black, parts, grid, size, Math.max(2, medianRun - 2));
 
@@ -953,6 +888,9 @@ function buildDrawingSteps(data: Uint8ClampedArray, size: number): {
 
   const used = specs.filter(s => s.strokes.length > 0);
   used.forEach((s, idx) => s.partIds.forEach(pid => partRank.set(pid, idx)));
+  // Black pupils are painted right after the "Cute Eyes" step has drawn them
+  const eyesRank = used.findIndex(s => s.label === STEP_LABELS.eyes);
+  const blobFills = eyesRank >= 0 ? blobs.map(b => ({ pixels: b.pixels, rank: eyesRank })) : [];
 
   const steps: KidDrawingStep[] = used.map((s, idx) => {
     const strokes = orderStrokesForPen(s.strokes);
@@ -985,12 +923,13 @@ function buildDrawingSteps(data: Uint8ClampedArray, size: number): {
       paths: strokes.map(st => ({ d: st.d, points: st.points })),
     };
   });
-  return { steps, parts, partGrid: grid, partRank };
+  return { steps, parts, partGrid: grid, partRank, growSteps, blobFills };
 }
 
 /** Friendly color name + kid prompt for an average RGB color */
 function describeColor(r: number, g: number, b: number): { hex: string; name: string; prompt: string } {
   const hex = rgbToHex(r, g, b);
+  if (r < 45 && g < 45 && b < 45) return { hex, name: 'Midnight Black', prompt: 'Black pupils! Shiny eyes!' };
   if (r < 110 && g < 90 && b < 90) return { hex, name: 'Dark Chocolate', prompt: 'Chocolate brown! Sweet stripes!' };
   if (r > 195 && g > 175 && b < 125) return { hex, name: 'Honey Yellow', prompt: 'Sunny yellow! Paint paint!' };
   if (r > 195 && g < 175 && b > 120) return { hex, name: 'Rosy Pink', prompt: 'Pretty pink! Rosy cheeks!' };
@@ -1010,9 +949,11 @@ function buildColoringSteps(
   parts: DrawPart[],
   grid: Int32Array,
   partRank: Map<number, number>,
+  growSteps: number,
+  blobFills: { pixels: number[]; rank: number }[],
   size: number
 ): KidColoringStep[] {
-  type Draft = { pixels: number[]; r: number; g: number; b: number; rank: number; main: boolean };
+  type Draft = { pixels: number[]; d: string; r: number; g: number; b: number; rank: number; main: boolean };
   const drafts: Draft[] = [];
 
   const interiorOf = (part: DrawPart) =>
@@ -1046,7 +987,10 @@ function buildColoringSteps(
     if (!bestBin) continue;
     const main = { r: bestBin.r / bestBin.n, g: bestBin.g / bestBin.n, b: bestBin.b / bestBin.n };
     if (isWhiteOrTransparent(main.r, main.g, main.b, 255)) continue;
-    drafts.push({ pixels: part.pixels, r: main.r, g: main.g, b: main.b, rank, main: true });
+    // Paint area = whole shape up to the middle of its outline
+    const pad = growSteps + 2;
+    const mainD = maskToPath(partMask(part, grid, size, growSteps), size, part.minX - pad, part.minY - pad, part.maxX + pad, part.maxY + pad);
+    drafts.push({ pixels: part.pixels, d: mainD, r: main.r, g: main.g, b: main.b, rank, main: true });
 
     // Contrasting areas inside the shape (stripes, cheeks...), after trimming thin anti-aliasing rings
     const differs = new Uint8Array(size * size);
@@ -1062,12 +1006,32 @@ function buildColoringSteps(
       const n = c.pixels.length;
       const avg = { r: sr / n, g: sg / n, b: sb / n };
       if (isWhiteOrTransparent(avg.r, avg.g, avg.b, 255)) continue; // eye shine, highlights
-      drafts.push({ pixels: c.pixels, r: avg.r, g: avg.g, b: avg.b, rank, main: false });
+      // Give back the pixels trimmed earlier, staying inside the shape
+      const area = growMask(c.pixels, size, 4, n => grid[n] === part.id);
+      drafts.push({ pixels: c.pixels, d: maskToPath(area, size, c.minX - 6, c.minY - 6, c.maxX + 6, c.maxY + 6), r: avg.r, g: avg.g, b: avg.b, rank, main: false });
     }
   }
 
+  // Pupils: dark blobs painted with their own color
+  for (const blob of blobFills) {
+    let sr = 0, sg = 0, sb = 0, minX = size, minY = size, maxX = 0, maxY = 0;
+    for (const p of blob.pixels) {
+      sr += data[p * 4]; sg += data[p * 4 + 1]; sb += data[p * 4 + 2];
+      const x = p % size;
+      const y = (p - x) / size;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+    const n = blob.pixels.length;
+    const mask = new Uint8Array(size * size);
+    for (const p of blob.pixels) mask[p] = 1;
+    drafts.push({ pixels: blob.pixels, d: maskToPath(mask, size, minX - 2, minY - 2, maxX + 2, maxY + 2), r: sr / n, g: sg / n, b: sb / n, rank: blob.rank, main: false });
+  }
+
   drafts.sort((a, b) => a.rank - b.rank || (a.main === b.main ? b.pixels.length - a.pixels.length : a.main ? -1 : 1));
-  const chosen = drafts.slice(0, 18);
+  const chosen = drafts.slice(0, 20);
 
   return chosen.map((dr, idx) => {
     let minX = size, minY = size, maxX = 0, maxY = 0, sx = 0, sy = 0;
@@ -1095,7 +1059,7 @@ function buildColoringSteps(
     const fx2 = Math.min(size, maxX + pad);
     const fy2 = Math.min(size, maxY + pad);
     const col = describeColor(dr.r, dr.g, dr.b);
-    const fillPath = traceRegionBoundary(dr.pixels, size, size, minX, minY, maxX, maxY);
+    const fillPath = dr.d;
 
     return {
       id: `color_region_${idx + 1}`,
@@ -1226,7 +1190,7 @@ export async function processColoredCharacterImage(
 
         // 3. Find the COMPLETE shapes (head, body, wings, feet...) and the small details (eyes, smile),
         //    ordered like a kid tutorial. The dotted guide below is drawn from these very same loops.
-        const { steps: drawingSteps, parts, partGrid, partRank } = buildDrawingSteps(data, size);
+        const { steps: drawingSteps, parts, partGrid, partRank, growSteps, blobFills } = buildDrawingSteps(data, size);
         const processedStrokes = drawingSteps.flatMap(st => st.paths.map(p => ({ d: p.d, points: p.points! })));
 
         // 6. RENDER CLEAN B&W OUTLINES (All colors removed completely!)
@@ -1290,7 +1254,7 @@ export async function processColoredCharacterImage(
 `;
 
         // 8. Coloring steps, in the same order as the drawing steps
-        const coloringSteps = buildColoringSteps(data, parts, partGrid, partRank, size);
+        const coloringSteps = buildColoringSteps(data, parts, partGrid, partRank, growSteps, blobFills, size);
 
         // 10. Validation Report
         const warnings: string[] = [];
