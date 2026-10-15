@@ -232,12 +232,13 @@ export function buildTutorialScript(
     };
   });
 
-  const color: StepLines[] = coloringSteps.map(step => {
+  // Voice calls are limited on the free tier, so only every 2nd color gets a spoken reaction
+  const color: StepLines[] = coloringSteps.map((step, idx) => {
     const cname =
       lang === 'fr' ? COLOR_NAMES_FR[step.colorNameEn] || step.colorNameEn.toLowerCase() : step.colorNameEn.toLowerCase();
     return {
       intro: { text: pick(COLOR_INTROS[lang], 'ci').replace('{c}', cname), style: 'dreamy' },
-      outro: { text: pick(COLOR_OUTROS[lang], 'co'), style: 'delighted' },
+      outro: { text: idx % 2 === 1 ? pick(COLOR_OUTROS[lang], 'co') : '', style: 'delighted' },
     };
   });
 
@@ -263,7 +264,7 @@ export function buildTutorialScript(
     finale,
     ...draw.flatMap(d => [d.intro, d.outro]),
     ...color.flatMap(c => [c.intro, c.outro]),
-  ];
+  ].filter(l => l.text);
 
   return { welcome, draw, drawDone, color, finale, all };
 }

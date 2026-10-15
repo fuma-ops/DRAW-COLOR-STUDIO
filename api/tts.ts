@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
-import { buildTtsPrompt, TTS_VOICES } from '../src/utils/ttsStyles';
+import { TTS_VOICES } from '../src/utils/ttsStyles';
+import { synthesizeSpeech } from '../src/utils/geminiTts';
 
 // Vercel serverless version of the /api/tts route from server.ts.
 // Uses Gemini TTS when GEMINI_API_KEY is set, otherwise the free Google voice fallback.
@@ -20,24 +21,11 @@ export default async function handler(req: any, res: any) {
     let mimeType = 'audio/wav';
 
     if (process.env.GEMINI_API_KEY) {
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash-tts',
-          contents: buildTtsPrompt(cleanText, styleKey, isFrench),
-          config: {
-            responseModalities: ['AUDIO'],
-            temperature: 1.0,
-            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: safeVoice } } },
-          },
-        });
-        const part = response.candidates?.[0]?.content?.parts?.[0];
-        if (part?.inlineData?.data) {
-          audioBase64 = part.inlineData.data;
-          mimeType = part.inlineData.mimeType || 'audio/wav';
-        }
-      } catch (err) {
-        console.error('Gemini TTS failed, using fallback', err);
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const synth = await synthesizeSpeech(ai, cleanText, styleKey, safeVoice, isFrench);
+      if (synth) {
+        audioBase64 = synth.audioBase64;
+        mimeType = synth.mimeType;
       }
     }
 

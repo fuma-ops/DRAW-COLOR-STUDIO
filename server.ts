@@ -3,7 +3,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
-import { buildTtsPrompt, TTS_VOICES } from './src/utils/ttsStyles';
+import { TTS_VOICES } from './src/utils/ttsStyles';
+import { synthesizeSpeech } from './src/utils/geminiTts';
 import { describeDrawing } from './src/utils/describeDrawing';
 
 dotenv.config();
@@ -20,7 +21,6 @@ const ai = new GoogleGenAI();
 
 // In-memory cache for audio snippets (letters, words, praises)
 const ttsAudioCache = new Map<string, { audioBase64: string; mimeType: string }>();
-let geminiQuotaExhaustedUntil = 0; // Gemini TTS is tried first; a cooldown is only set after a real 429
 
 // High-fidelity Text-To-Speech endpoint for English Learning & Video Audio Stream
 app.post('/api/tts', async (req, res) => {
@@ -47,39 +47,14 @@ app.post('/api/tts', async (req, res) => {
       return res.json(ttsAudioCache.get(cacheKey));
     }
 
-    // Call Gemini TTS model if quota is active
+    // Gemini TTS: tries several models in turn (each has its own free daily allowance)
     let audioBase64: string | null = null;
     let mimeType = 'audio/wav';
 
-    if (Date.now() >= geminiQuotaExhaustedUntil) {
-      try {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash-tts',
-          contents: buildTtsPrompt(cleanText, styleKey, isFrench),
-          config: {
-            responseModalities: ['AUDIO'],
-            temperature: 1.0,
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: safeVoice,
-                },
-              },
-            },
-          },
-        });
-        const candidate = response.candidates?.[0];
-        const part = candidate?.content?.parts?.[0];
-        if (part?.inlineData?.data) {
-          audioBase64 = part.inlineData.data;
-          mimeType = part.inlineData.mimeType || 'audio/wav';
-        }
-      } catch (primaryErr: any) {
-        const msg = String(primaryErr?.message || '');
-        if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
-          geminiQuotaExhaustedUntil = Date.now() + 60 * 60 * 1000;
-        }
-      }
+    const synth = await synthesizeSpeech(ai, cleanText, styleKey, safeVoice, isFrench);
+    if (synth) {
+      audioBase64 = synth.audioBase64;
+      mimeType = synth.mimeType;
     }
 
     // High-quality, reliable, quota-free fallback using Google natural voice stream
@@ -108,7 +83,8 @@ app.post('/api/tts', async (req, res) => {
         audioBase64,
         mimeType,
       };
-      ttsAudioCache.set(cacheKey, result);
+      // only keep the good Gemini voice in the cache (never freeze the plain fallback voice)
+      if (synth) ttsAudioCache.set(cacheKey, result);
       return res.json(result);
     }
 
